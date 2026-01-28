@@ -1,19 +1,31 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
-// import 'package:google_maps/google_maps.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 void main() {
-  runApp(const MainApp());
+  runApp(MainApp());
 }
 
 class MainApp extends StatelessWidget {
-  const MainApp({super.key});
+  var curr;
+
+  late StreamSubscription<Position> positionStream =
+    Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 0, // Updates always
+      ),
+    ).listen((Position position) {
+      curr = '${position.latitude}, ${position.longitude}';
+    });
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
+    return MaterialApp(
       home: Scaffold(
         body: Center(
-          child: Text('Now without Linux, Windows, or Mac OS X support!'),
+          child: Text('$curr'),
         ),
       ),
     );
