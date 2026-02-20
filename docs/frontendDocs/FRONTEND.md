@@ -36,6 +36,7 @@ frontend/
         app.dart
 
         main.dart
+        
         secrets.dart
 ```
 
