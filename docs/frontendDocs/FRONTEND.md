@@ -12,7 +12,7 @@ The application integrates:
 
 ### Structure
 
-'''
+```
 frontend/
 
     lib/
@@ -36,7 +36,7 @@ frontend/
         app.dart
 
         main.dart
-'''
+```
 
 The frontend is separated into submodules for easier app development. 
 
