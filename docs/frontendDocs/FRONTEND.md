@@ -12,6 +12,7 @@ The application integrates:
 
 ### Structure
 
+
 frontend/
 
     lib/
@@ -38,19 +39,19 @@ frontend/
 
 The frontend is separated into submodules for easier app development. 
 
-main.dart: Application entrypoint
+- main.dart: Application entrypoint
 
-app.dart: Defines routes and navigation
+- app.dart: Defines routes and navigation
 
-login_screen.dart: User authentication UI
+- login_screen.dart: User authentication UI
 
-live_monitor_screen.dart: Dashboard displaying detection information, location, weather, etc
+- live_monitor_screen.dart: Dashboard displaying detection information, location, weather, etc
 
-drowsiness_detected_screen.dart: Page that routes to Google Maps after drowsiness is detected
+- drowsiness_detected_screen.dart: Page that routes to Google Maps after drowsiness is detected
 
-weather_service.dart: Handles OpenWeather API communication
+- weather_service.dart: Handles OpenWeather API communication
 
-secrets.dart: Stores API keys (gitignored)
+- secrets.dart: Stores API keys (gitignored)
 
 ### App Navigation Flow
 
