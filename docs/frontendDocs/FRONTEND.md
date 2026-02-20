@@ -36,6 +36,7 @@ frontend/
         app.dart
 
         main.dart
+        secrets.dart
 ```
 
 The frontend is separated into submodules for easier app development. 
