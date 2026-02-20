@@ -13,26 +13,43 @@ The application integrates:
 ### Structure
 
 frontend/
+
     lib/
+
         screens/
+
             drowiness_detected_screen.dart
+
             live_monitor_screen.dart
+
             login_screen.dart
+
         services/
+
             places_service.dart
+
             weather_service.dart
+
             speed_tracking.dart
+
         app.dart
+
         main.dart
 
 The frontend is separated into submodules for easier app development. 
 
 main.dart: Application entrypoint
+
 app.dart: Defines routes and navigation
+
 login_screen.dart: User authentication UI
+
 live_monitor_screen.dart: Dashboard displaying detection information, location, weather, etc
+
 drowsiness_detected_screen.dart: Page that routes to Google Maps after drowsiness is detected
+
 weather_service.dart: Handles OpenWeather API communication
+
 secrets.dart: Stores API keys (gitignored)
 
 ### App Navigation Flow
@@ -46,6 +63,7 @@ Operator side of the application towards the next quarter.
 
 #### Driver Authentication:
 email: admin@blink.ai
+
 password: blink123
 
 ### Dashboard Components
