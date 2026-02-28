@@ -1,7 +1,11 @@
-# Drowsiness Guide
+# drowsiness_guide
 
-This is an app that connects with the Computer Board placed in the vehicle so that it may notify the user if it detects drowsiness. The application itself was built using Flutter and is compatible with both iOS and Android
+This is the App that will display the nearby rest-stops
 
-## Usage
-To build for Android use the following command in the drowsiness\_guide directory
-`flutter build apk`
+TODO:
+- Display nearby rest stops
+- Redirect to Google Maps
+- Add weather data
+
+Backloog:
+- Add Apple Maps functionality

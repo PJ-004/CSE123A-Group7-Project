@@ -1,3 +1,3 @@
-# CSE123A Group 7 Project
-This is the project made for the CSE123A course at University of California - Santa Cruz. <br> <br>
-This project aims to spot if a driver is getting drowsy while driving and inform the driver of it.
+# UNOFFICIAL REPO FOR 123. DO NOT SUBMIT OR SHARE OUTSIDE OF GROUP 7.
+
+This repo will compile all the work done for this class and then we'll split it up accordingly after to push to the legit github "https://github.com/PJ-004/CSE123A-Group7-Project.git". 
