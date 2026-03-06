@@ -1,0 +1,10 @@
+Tests to implement
++ User out of Frame
++ Camera got moved
++ Not connected to Jetson
++ Calibration (user hasn't calibrated)
++ Recieve user is completely asleep
++ Recieve user is about to fall asleep
++ Detect fake images
++ Does the app work with no network
++ Spoofing with incorrect camera feed

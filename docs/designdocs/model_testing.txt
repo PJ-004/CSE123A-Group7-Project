@@ -1,0 +1,5 @@
+Tests to implement for Model
++ User out of Frame
++ Camera got moved
++ Not connected to Camera
++ Calibration (user hasn't calibrated)
