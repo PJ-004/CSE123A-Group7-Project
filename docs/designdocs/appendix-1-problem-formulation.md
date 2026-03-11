@@ -4,16 +4,7 @@
 
 ## 1.1 Conceptualisations
 
-### Problem Space
-
-Driver drowsiness is a critical safety concern on roads worldwide. According to the National Highway Traffic Safety Administration (NHTSA), drowsy driving is responsible for an estimated 100,000 crashes, 71,000 injuries, and 1,550 fatalities annually in the United States alone. The underlying challenge is that drowsiness onset is gradual and often unrecognized by the driver until it is too late.
-
-Our team identified a need for a **real-time, edge-based drowsiness detection system** that can alert a driver the moment fatigue indicators are detected — without relying on cloud connectivity or manual self-assessment.
-
 ### Initial Concept
-
-Q: What is the current alert doing? Shut eyes?
-Q-TA: "their smartphone". Are we describing the ideal design or what we are about to demo? 
 
 The core idea is a compact, vehicle-mounted device that uses a camera to continuously monitor the driver's face. When signs of drowsiness are detected (prolonged eye closure, high blink rate), the system immediately alerts the driver through their smartphone. The system must operate with minimal latency.
 
