@@ -56,10 +56,10 @@ The team of six divided responsibilities based on individual expertise and inter
 | **ML Pipeline** | Jason, Soham | Face detection model selection, EAR computation, head pose estimation, camera integration, sliding window fatigue classification |
 | **SoC → Phone Communication (BLE)** | Jason, Soham | BLE service/characteristic setup on SoC, drowsiness event packet format, connection management |
 | **SoC → Backend Communication (MQTT)** | Jason, Soham | MQTT client on SoC, broker setup, event topic/payload design, WiFi connectivity |
-| **SoC → External Alarm (Wired)** | Jason, Soham, Pranav | GPIO-driven alarm trigger, wired buzzer/speaker integration, signal timing |
+| **SoC → External Alarm (Wired)** | Ricardo, Pravin | GPIO-driven alarm trigger, wired buzzer/speaker integration, signal timing |
 | **Backend & Fleet Operator Interface** | Jason, Soham | MQTT event consumer, PostgreSQL schema design, WebSocket gateway for fleet operator notification |
 | **Flutter Mobile App** | Pranav, Pravin, Alejandro, Ricardo | UI/UX design, BLE client, alert display (audio/vibration/visual), rerouting suggestions, connection status |
-| **Hardware & Enclosure** | Jason, Soham, Pranav | Device mounting, IR camera selection and positioning, power supply (12V vehicle adapter), physical enclosure/housing, external alarm mounting |
+| **Hardware & Enclosure** | Alejandro, Pranav | Device mounting, IR camera selection and positioning, power supply (12V vehicle adapter), physical enclosure/housing, external alarm mounting |
 | **Documentation & Testing — ML Pipeline & Integration** | Jason, Soham | Design document coordination, appendices (problem formulation, planning), test plan development, integration testing across all three alert paths |
 | **Documentation & Testing — Mobile App** | Pranav, Pravin, Alejandro, Ricardo | Design document coordination, appendices (problem formulation, planning), test plan development |
 
