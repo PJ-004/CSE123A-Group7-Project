@@ -37,7 +37,7 @@ Helpful alerts that feel like a safety assistant
 Fair reporting to the fleet operator  
 Less risk of accidents, violations, and job-related stress  
 
-# 2. Fleet Operator Persona
+2. Fleet Operator Persona
 Name: Sarah Porter
 Age: 38
 Role: Fleet operations manager
