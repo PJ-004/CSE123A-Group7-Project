@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -17,6 +19,9 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
   static const Color _bgTop = Color(0xFFCED8E4);
   static const Color _bgBottom = Color(0xFF7E97B9);
   static const Color _brandBlue = Color(0xFF5E8AD6);
+  static const Duration _loadTimeout = Duration(seconds: 10);
+  static const String _locationServiceErrorMessage =
+      'Location services error, check location permissions';
 
   bool _loading = false;
   String? _err;
@@ -46,18 +51,45 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.low,
         ),
-      );
+      ).timeout(_loadTimeout);
 
       final svc = OSMPlacesService();
-      final places = await svc.fetchNearestGasStations(
-        lat: pos.latitude,
-        lon: pos.longitude,
-        limit: 5,
-      );
+      final gasFuture = svc
+          .fetchNearestGasStations(
+            lat: pos.latitude,
+            lon: pos.longitude,
+            limit: 5,
+          )
+          .timeout(_loadTimeout);
+      final restFuture = svc
+          .fetchRestStopsWithin30Miles(
+            lat: pos.latitude,
+            lon: pos.longitude,
+          )
+          .timeout(_loadTimeout);
 
-      final models = places
+      final places = await gasFuture;
+      final restPlaces = await restFuture;
+
+      final gasModels = places
           .map(
             (p) => _GasStationCardModel(
+              name: p.name,
+              vicinity: p.vicinity,
+              lat: p.lat,
+              lon: p.lon,
+              distanceMeters: Geolocator.distanceBetween(
+                pos.latitude,
+                pos.longitude,
+                p.lat,
+                p.lon,
+              ),
+            ),
+          )
+          .toList(growable: false);
+      final restModels = restPlaces
+          .map(
+            (p) => _RestStopCardModel(
               name: p.name,
               vicinity: p.vicinity,
               lat: p.lat,
@@ -75,48 +107,22 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
       if (!mounted) return;
       setState(() {
         _pos = pos;
-        _stations = models;
+        _stations = gasModels;
+        _restStops = restModels;
         _loading = false;
+        _restStopsLoading = false;
       });
-
-      // Load rest stops within 30 miles (same position).
-      try {
-        final restPlaces = await svc.fetchRestStopsWithin30Miles(
-          lat: pos.latitude,
-          lon: pos.longitude,
-        );
-        final restModels = restPlaces
-            .map(
-              (p) => _RestStopCardModel(
-                name: p.name,
-                vicinity: p.vicinity,
-                lat: p.lat,
-                lon: p.lon,
-                distanceMeters: Geolocator.distanceBetween(
-                  pos.latitude,
-                  pos.longitude,
-                  p.lat,
-                  p.lon,
-                ),
-              ),
-            )
-            .toList(growable: false);
-        if (!mounted) return;
-        setState(() {
-          _restStops = restModels;
-          _restStopsLoading = false;
-        });
-      } catch (_) {
-        if (!mounted) return;
-        setState(() {
-          _restStops = const [];
-          _restStopsLoading = false;
-        });
-      }
-    } catch (e) {
+    } on TimeoutException {
       if (!mounted) return;
       setState(() {
-        _err = e.toString();
+        _err = _locationServiceErrorMessage;
+        _loading = false;
+        _restStopsLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _err = _locationServiceErrorMessage;
         _loading = false;
         _restStopsLoading = false;
       });
