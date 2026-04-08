@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:drowsiness_guide/screens/osm_map_screen.dart';
 import 'package:drowsiness_guide/services/osm_places_service.dart';
+import 'package:drowsiness_guide/app.dart';
 
 class DrowsinessDetectedScreen extends StatefulWidget {
   const DrowsinessDetectedScreen({super.key});
@@ -22,8 +23,6 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
   String? _err;
   Position? _pos;
   List<_GasStationCardModel> _stations = const [];
-  List<_RestStopCardModel> _restStops = const [];
-  bool _restStopsLoading = false;
 
   @override
   void initState() {
@@ -37,8 +36,6 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
       _loading = true;
       _err = null;
       _stations = const [];
-      _restStops = const [];
-      _restStopsLoading = true;
     });
 
     try {
@@ -78,59 +75,19 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
         _stations = models;
         _loading = false;
       });
-
-      // Load rest stops within 30 miles (same position).
-      try {
-        final restPlaces = await svc.fetchRestStopsWithin30Miles(
-          lat: pos.latitude,
-          lon: pos.longitude,
-        );
-        final restModels = restPlaces
-            .map(
-              (p) => _RestStopCardModel(
-                name: p.name,
-                vicinity: p.vicinity,
-                lat: p.lat,
-                lon: p.lon,
-                distanceMeters: Geolocator.distanceBetween(
-                  pos.latitude,
-                  pos.longitude,
-                  p.lat,
-                  p.lon,
-                ),
-              ),
-            )
-            .toList(growable: false);
-        if (!mounted) return;
-        setState(() {
-          _restStops = restModels;
-          _restStopsLoading = false;
-        });
-      } catch (_) {
-        if (!mounted) return;
-        setState(() {
-          _restStops = const [];
-          _restStopsLoading = false;
-        });
-      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _err = e.toString();
         _loading = false;
-        _restStopsLoading = false;
       });
     }
   }
 
   Future<void> _openDirections(_GasStationCardModel station) async {
-    await _openDirectionsTo(station.lat, station.lon);
-  }
-
-  Future<void> _openDirectionsTo(double lat, double lon) async {
     final uri = Uri.https('www.google.com', '/maps/dir/', {
       'api': '1',
-      'destination': '$lat,$lon',
+      'destination': '${station.lat},${station.lon}',
       if (_pos != null) 'origin': '${_pos!.latitude},${_pos!.longitude}',
       'travelmode': 'driving',
     });
@@ -150,14 +107,19 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
   }
 
   Widget _flatCard({required Widget child}) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.95),
+        color: isDark
+            ? const Color(0xFF1E2D40)
+            : Colors.white.withValues(alpha: 0.95),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.black.withOpacity(0.12)),
-        boxShadow: const [
-          BoxShadow(blurRadius: 12, color: Colors.black12),
-        ],
+        border: Border.all(
+          color: isDark
+              ? Colors.white.withValues(alpha: 0.08)
+              : Colors.black.withValues(alpha: 0.12),
+        ),
+        boxShadow: const [BoxShadow(blurRadius: 12, color: Colors.black12)],
       ),
       child: child,
     );
@@ -167,14 +129,25 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
     return FilledButton.styleFrom(
       backgroundColor: _brandBlue,
       foregroundColor: Colors.white,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final isDark = DriverSafetyApp.of(context).isDark;
+    final bgTop = isDark ? const Color(0xFF0B1220) : const Color(0xFFCED8E4);
+    final bgBottom = isDark ? const Color(0xFF0E1628) : const Color(0xFF7E97B9);
+    final cardColor = isDark
+        ? const Color(0xFF1E2D40)
+        : Colors.white.withOpacity(0.95);
+    final textColor = isDark ? Colors.white : Colors.black;
+    final subColor = isDark
+        ? Colors.white.withOpacity(0.6)
+        : Colors.black.withOpacity(0.65);
+    final borderColor = isDark
+        ? Colors.white.withOpacity(0.08)
+        : Colors.black.withOpacity(0.12);
     return Scaffold(
       appBar: AppBar(
         title: const Text(
@@ -198,7 +171,7 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
           ),
         ),
         child: SafeArea(
-          child: SingleChildScrollView(
+          child: Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -215,7 +188,7 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
                 Text(
                   'If you feel drowsy, pull over somewhere safe.',
                   style: TextStyle(
-                    color: Colors.black.withOpacity(0.65),
+                    color: Colors.black.withValues(alpha: 0.65),
                     fontWeight: FontWeight.w500,
                   ),
                 ),
@@ -229,7 +202,9 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
                   const SizedBox(height: 12),
                   Text(
                     'Finding nearby gas stations…',
-                    style: TextStyle(color: Colors.black.withOpacity(0.65)),
+                    style: TextStyle(
+                      color: Colors.black.withValues(alpha: 0.65),
+                    ),
                   ),
                 ] else if (_err != null) ...[
                   _flatCard(
@@ -249,7 +224,7 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
                           Text(
                             _err!,
                             style: TextStyle(
-                              color: Colors.black.withOpacity(0.65),
+                              color: Colors.black.withValues(alpha: 0.65),
                             ),
                           ),
                           const SizedBox(height: 12),
@@ -269,7 +244,9 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
                       padding: const EdgeInsets.all(14),
                       child: Text(
                         'No results found.',
-                        style: TextStyle(color: Colors.black.withOpacity(0.7)),
+                        style: TextStyle(
+                          color: Colors.black.withValues(alpha: 0.7),
+                        ),
                       ),
                     ),
                   ),
@@ -309,7 +286,9 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
                                       maxLines: 2,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                        color: Colors.black.withOpacity(0.65),
+                                        color: Colors.black.withValues(
+                                          alpha: 0.65,
+                                        ),
                                       ),
                                     ),
                                   const SizedBox(height: 8),
@@ -317,7 +296,9 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
                                     _formatMiles(s.distanceMeters),
                                     style: TextStyle(
                                       fontWeight: FontWeight.w800,
-                                      color: Colors.black.withOpacity(0.8),
+                                      color: Colors.black.withValues(
+                                        alpha: 0.8,
+                                      ),
                                     ),
                                   ),
                                   const Spacer(),
@@ -344,10 +325,17 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
                                       Expanded(
                                         child: OutlinedButton(
                                           style: OutlinedButton.styleFrom(
-                                            foregroundColor: Colors.black,
+                                            foregroundColor: isDark
+                                                ? Colors.white
+                                                : Colors.black,
                                             side: BorderSide(
-                                              color:
-                                                  Colors.black.withOpacity(0.18),
+                                              color: isDark
+                                                  ? Colors.white.withValues(
+                                                      alpha: 0.18,
+                                                    )
+                                                  : Colors.black.withValues(
+                                                      alpha: 0.18,
+                                                    ),
                                             ),
                                             shape: RoundedRectangleBorder(
                                               borderRadius:
@@ -371,144 +359,11 @@ class _DrowsinessDetectedScreenState extends State<DrowsinessDetectedScreen> {
                   const SizedBox(height: 12),
                   Text(
                     'Preview Map shows the route in-app. Directions opens Google Maps.',
-                    style: TextStyle(color: Colors.black.withOpacity(0.6)),
+                    style: TextStyle(
+                      color: Colors.black.withValues(alpha: 0.6),
+                    ),
                   ),
                 ],
-                const SizedBox(height: 20),
-                const Text(
-                  'Rest stops within 30 miles',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w800,
-                    color: Colors.black,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                if (_restStopsLoading)
-                  _flatCard(
-                    child: Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Row(
-                        children: [
-                          const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          const SizedBox(width: 12),
-                          Text(
-                            'Finding rest stops…',
-                            style: TextStyle(color: Colors.black.withOpacity(0.65)),
-                          ),
-                        ],
-                      ),
-                    ),
-                  )
-                else if (_restStops.isEmpty)
-                  _flatCard(
-                    child: Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Text(
-                        'No rest stops within 30 miles',
-                        style: TextStyle(color: Colors.black.withOpacity(0.7)),
-                      ),
-                    ),
-                  )
-                else
-                  SizedBox(
-                    height: 190,
-                    child: ListView.separated(
-                      scrollDirection: Axis.horizontal,
-                      itemCount: _restStops.length,
-                      separatorBuilder: (context, index) =>
-                          const SizedBox(width: 12),
-                      itemBuilder: (context, idx) {
-                        final r = _restStops[idx];
-                        return SizedBox(
-                          width: 295,
-                          child: _flatCard(
-                            child: Padding(
-                              padding: const EdgeInsets.all(14),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    r.name,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w800,
-                                      color: Colors.black,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  if (r.vicinity.isNotEmpty)
-                                    Text(
-                                      r.vicinity,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: Colors.black.withOpacity(0.65),
-                                      ),
-                                    ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    _formatMiles(r.distanceMeters),
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w800,
-                                      color: Colors.black.withOpacity(0.8),
-                                    ),
-                                  ),
-                                  const Spacer(),
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        child: FilledButton(
-                                          style: _brandFilledButtonStyle(),
-                                          onPressed: () {
-                                            Navigator.push(
-                                              context,
-                                              MaterialPageRoute(
-                                                builder: (_) => OSMMapScreen(
-                                                  destLat: r.lat,
-                                                  destLng: r.lon,
-                                                ),
-                                              ),
-                                            );
-                                          },
-                                          child: const Text('Preview Map'),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 10),
-                                      Expanded(
-                                        child: OutlinedButton(
-                                          style: OutlinedButton.styleFrom(
-                                            foregroundColor: Colors.black,
-                                            side: BorderSide(
-                                              color:
-                                                  Colors.black.withOpacity(0.18),
-                                            ),
-                                            shape: RoundedRectangleBorder(
-                                              borderRadius:
-                                                  BorderRadius.circular(8),
-                                            ),
-                                          ),
-                                          onPressed: () =>
-                                              _openDirectionsTo(r.lat, r.lon),
-                                          child: const Text('Directions'),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
               ],
             ),
           ),
@@ -526,22 +381,6 @@ class _GasStationCardModel {
   final double distanceMeters;
 
   const _GasStationCardModel({
-    required this.name,
-    required this.vicinity,
-    required this.lat,
-    required this.lon,
-    required this.distanceMeters,
-  });
-}
-
-class _RestStopCardModel {
-  final String name;
-  final String vicinity;
-  final double lat;
-  final double lon;
-  final double distanceMeters;
-
-  const _RestStopCardModel({
     required this.name,
     required this.vicinity,
     required this.lat,
