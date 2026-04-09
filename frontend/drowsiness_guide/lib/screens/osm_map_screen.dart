@@ -7,6 +7,9 @@ import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../secrets.dart';
+import '../services/osm_places_service.dart' as osm;
+import '../services/places_service.dart' as gplaces;
 
 class OSMMapScreen extends StatefulWidget {
   final double? destLat;
@@ -28,6 +31,13 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
   Position? _pos;
   LatLng? _dest;
   List<LatLng> _route = [];
+  List<osm.PlaceSummary> _stops = [];
+  bool _loadingStops = false;
+  String? _stopsError;
+  final osm.OSMPlacesService _places = osm.OSMPlacesService();
+  final gplaces.PlacesService _googlePlaces = gplaces.PlacesService(
+    apiKey: googlePlacesApiKey,
+  );
 
   String _status = 'Loading location…';
   String _routeInfo = '';
@@ -66,7 +76,9 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
 
       setState(() => _status = 'Getting current position…');
       final p = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
       );
 
       setState(() {
@@ -76,6 +88,8 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
 
       final me = LatLng(p.latitude, p.longitude);
       _mapController.move(me, 14);
+
+      await _loadStops();
 
       if (_dest != null) {
         await _buildRoute();
@@ -127,10 +141,9 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
           .cast<List<dynamic>>();
 
       final pts = coords
-          .map((c) => LatLng(
-                (c[1] as num).toDouble(),
-                (c[0] as num).toDouble(),
-              ))
+          .map(
+            (c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()),
+          )
           .toList();
 
       setState(() {
@@ -143,6 +156,80 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
       _fitToPoints([from, to, ...pts]);
     } catch (e) {
       setState(() => _status = 'Routing failed: $e');
+    }
+  }
+
+  Future<void> _loadStops() async {
+    if (_pos == null || _loadingStops) return;
+
+    setState(() {
+      _loadingStops = true;
+      _stopsError = null;
+    });
+
+    try {
+      final stops = await _fetchStopsWithFallback();
+
+      if (!mounted) return;
+      setState(() {
+        _stops = stops;
+        _loadingStops = false;
+      });
+
+      // If no explicit destination was provided, route to the nearest stop.
+      if (_dest == null && stops.isNotEmpty) {
+        _dest = LatLng(stops.first.lat, stops.first.lon);
+        await _buildRoute();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingStops = false;
+        _stopsError = _stops.isNotEmpty
+            ? '$e (showing previous stops)'
+            : e.toString();
+      });
+    }
+  }
+
+  Future<List<osm.PlaceSummary>> _fetchStopsWithFallback() async {
+    final lat = _pos!.latitude;
+    final lon = _pos!.longitude;
+
+    try {
+      return await _places.fetchNearestGasStations(
+        lat: lat,
+        lon: lon,
+        limit: 5,
+      );
+    } catch (osmErr) {
+      debugPrint('OSM stops failed: $osmErr');
+      try {
+        final g = await _googlePlaces.fetchNearestGasStations(
+          lat: lat,
+          lon: lon,
+          limit: 5,
+        );
+        if (g.isEmpty) {
+          throw Exception('Google Places returned no stops.');
+        }
+        return g
+            .map(
+              (p) => osm.PlaceSummary(
+                name: p.name,
+                vicinity: p.vicinity,
+                lat: p.lat,
+                lon: p.lon,
+              ),
+            )
+            .toList();
+      } catch (googleErr) {
+        debugPrint('Google stops fallback failed: $googleErr');
+        throw Exception(
+          'OSM and Google stop lookups failed. '
+          'OSM: $osmErr | Google: $googleErr',
+        );
+      }
     }
   }
 
@@ -201,6 +288,11 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
             onPressed: (_pos != null && _dest != null) ? _buildRoute : null,
             icon: const Icon(Icons.alt_route),
           ),
+          IconButton(
+            tooltip: 'Reload stops',
+            onPressed: _pos == null || _loadingStops ? null : _loadStops,
+            icon: const Icon(Icons.local_gas_station),
+          ),
         ],
       ),
       body: Container(
@@ -239,7 +331,7 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                             Polyline(
                               points: _route,
                               strokeWidth: 9,
-                              color: Colors.black.withOpacity(0.22),
+                              color: Colors.black.withValues(alpha: 0.22),
                               strokeCap: StrokeCap.round,
                               strokeJoin: StrokeJoin.round,
                             ),
@@ -265,7 +357,9 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                                   shape: BoxShape.circle,
                                   color: _brandBlue,
                                   border: Border.all(
-                                      color: Colors.white, width: 2),
+                                    color: Colors.white,
+                                    width: 2,
+                                  ),
                                   boxShadow: const [
                                     BoxShadow(
                                       blurRadius: 8,
@@ -285,7 +379,31 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                                   shape: BoxShape.circle,
                                   color: const Color(0xFFD65E5E),
                                   border: Border.all(
-                                      color: Colors.white, width: 2),
+                                    color: Colors.white,
+                                    width: 2,
+                                  ),
+                                  boxShadow: const [
+                                    BoxShadow(
+                                      blurRadius: 8,
+                                      color: Colors.black26,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          for (final stop in _stops)
+                            Marker(
+                              point: LatLng(stop.lat, stop.lon),
+                              width: 20,
+                              height: 20,
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: const Color(0xFF22C55E),
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 2,
+                                  ),
                                   boxShadow: const [
                                     BoxShadow(
                                       blurRadius: 8,
@@ -306,12 +424,15 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                     right: 12,
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 12),
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
                       decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.95),
+                        color: Colors.white.withValues(alpha: 0.95),
                         borderRadius: BorderRadius.circular(10),
-                        border:
-                            Border.all(color: Colors.black.withOpacity(0.12)),
+                        border: Border.all(
+                          color: Colors.black.withValues(alpha: 0.12),
+                        ),
                         boxShadow: const [
                           BoxShadow(blurRadius: 12, color: Colors.black12),
                         ],
@@ -320,7 +441,11 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                         children: [
                           Expanded(
                             child: Text(
-                              _routeInfo.isNotEmpty ? _routeInfo : _status,
+                              _routeInfo.isNotEmpty
+                                  ? _routeInfo
+                                  : _stopsError != null
+                                  ? _stopsError!
+                                  : _status,
                               style: const TextStyle(
                                 color: Colors.black,
                                 fontWeight: FontWeight.w600,
@@ -336,7 +461,9 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                                 backgroundColor: _brandBlue,
                                 foregroundColor: Colors.white,
                                 padding: const EdgeInsets.symmetric(
-                                    horizontal: 12, vertical: 10),
+                                  horizontal: 12,
+                                  vertical: 10,
+                                ),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(8),
                                 ),
@@ -350,16 +477,46 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                   ),
 
                   Positioned(
+                    right: 12,
+                    bottom: 10,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.88),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: Colors.black.withValues(alpha: 0.10),
+                        ),
+                      ),
+                      child: Text(
+                        _loadingStops
+                            ? 'Loading stops…'
+                            : 'Stops: ${_stops.length}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.black87,
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  Positioned(
                     left: 12,
                     bottom: 10,
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 6),
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
                       decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.88),
+                        color: Colors.white.withValues(alpha: 0.88),
                         borderRadius: BorderRadius.circular(10),
-                        border:
-                            Border.all(color: Colors.black.withOpacity(0.10)),
+                        border: Border.all(
+                          color: Colors.black.withValues(alpha: 0.10),
+                        ),
                       ),
                       child: const Text(
                         '© OpenStreetMap contributors • © CARTO',
