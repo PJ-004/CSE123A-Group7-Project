@@ -2,253 +2,42 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
-import asyncio
-from datetime import datetime, timezone
-import json
-import math
-import time
 import os
-import queue
-import threading
-import urllib.request
-import uuid
+from pathlib import Path
+import time
 import numpy as np
-from jetson_alert_dispatcher import JetsonAlertDispatcher
+import threading
 
-
-def utc_timestamp():
-    """Return an RFC3339 UTC timestamp."""
-    return datetime.now(timezone.utc).isoformat()
-
-
-def env_bool(name, default=False):
-    """Parse boolean environment variables."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def env_int(name, default):
-    """Parse integer environment variables."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def env_first(names, default=None):
-    """Return first non-empty environment variable from a list of names."""
-    for name in names:
-        value = os.getenv(name)
-        if value is not None and value != "":
-            return value
-    return default
-
-
-def env_int_first(names, default):
-    """Parse first non-empty integer environment variable from names."""
-    value = env_first(names)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def env_bool_first(names, default=False):
-    """Parse first non-empty boolean environment variable from names."""
-    value = env_first(names)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"0", "false", "no", "off"}
-
-
-class WebSocketBroadcaster:
-    """Broadcast JSON messages to all connected websocket clients."""
-    def __init__(self, host="0.0.0.0", port=8765):
-        self.host = host
-        self.port = port
-        self.clients = set()
-        self.queue = queue.Queue()
-        self.thread = None
-        self.loop = None
-        self._server = None
-        self._running = threading.Event()
-        self._enabled = False
-        self._ws_mod = None
-        self._startup_error = None
-
-    def start(self):
-        """Start websocket server on a background thread."""
-        try:
-            import websockets  # pylint: disable=import-outside-toplevel
-            self._ws_mod = websockets
-        except ImportError:
-            print("WebSocket disabled: install dependency with 'pip install websockets'")
-            return False
-
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-        self._running.wait(timeout=3.0)
-        if self._startup_error is not None:
-            print(f"WebSocket startup failed: {self._startup_error}")
-        return self._enabled
-
-    def send(self, payload):
-        """Queue a payload for broadcast."""
-        if not self._enabled:
-            return
-        try:
-            self.queue.put_nowait(payload)
-        except queue.Full:
-            pass
-
-    def stop(self):
-        """Stop websocket server and worker loop."""
-        if not self._enabled:
-            return
-        self._enabled = False
-        self.queue.put_nowait(None)
-        if self.loop is not None:
-            self.loop.call_soon_threadsafe(self.loop.stop)
-        if self.thread is not None:
-            self.thread.join(timeout=3.0)
-
-    def _run(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        try:
-            self.loop.run_until_complete(self._serve())
-            self.loop.create_task(self._pump())
-            self._enabled = True
-        except Exception as exc:
-            self._startup_error = exc
-            self._enabled = False
-            self._running.set()
-            self.loop.close()
-            return
-        self._running.set()
-        try:
-            self.loop.run_forever()
-        finally:
-            self._enabled = False
-            if self._server is not None:
-                self._server.close()
-                self.loop.run_until_complete(self._server.wait_closed())
-            tasks = asyncio.all_tasks(self.loop)
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                self.loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
-            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
-            self.loop.close()
-
-    async def _serve(self):
-        async def handler(websocket):
-            self.clients.add(websocket)
-            try:
-                async for _ in websocket:
-                    pass
-            except Exception:
-                pass
-            finally:
-                self.clients.discard(websocket)
-
-        self._server = await self._ws_mod.serve(handler, self.host, self.port)
-        print(f"WebSocket server listening on ws://{self.host}:{self.port}")
-
-    async def _pump(self):
-        while True:
-            item = await asyncio.to_thread(self.queue.get)
-            if item is None:
-                break
-            if not self.clients:
-                continue
-            message = json.dumps(item)
-            stale = []
-            # Iterate over a snapshot; handlers may add/remove clients concurrently.
-            for client in tuple(self.clients):
-                try:
-                    await client.send(message)
-                except Exception:
-                    stale.append(client)
-            for client in stale:
-                self.clients.discard(client)
-
-
-class LatestFrameReader:
-    """Read camera frames on a background thread and keep only the newest frame."""
-
-    def __init__(self, cap, queue_size=1):
-        self.cap = cap
-        self.queue = queue.Queue(maxsize=max(1, queue_size))
-        self.stop_event = threading.Event()
-        self.thread = None
-        self.frames_read = 0
-        self.frames_dropped = 0
-        self.read_failed = False
-
-    def start(self):
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-
-    def _run(self):
-        while not self.stop_event.is_set():
-            success, frame = self.cap.read()
-            if not success:
-                self.read_failed = True
-                self.stop_event.set()
-                break
-            self.frames_read += 1
-            item = (int(time.time() * 1000), frame)
-            if self.queue.full():
-                try:
-                    self.queue.get_nowait()
-                    self.frames_dropped += 1
-                except queue.Empty:
-                    pass
-            try:
-                self.queue.put_nowait(item)
-            except queue.Full:
-                self.frames_dropped += 1
-
-    def read(self, timeout=1.0):
-        """Return (timestamp_ms, frame) or (None, None) when no frame is available."""
-        try:
-            return self.queue.get(timeout=timeout)
-        except queue.Empty:
-            return None, None
-
-    def stop(self):
-        self.stop_event.set()
-        if self.thread is not None:
-            self.thread.join(timeout=2.0)
-
+# Local imports
+from modules.jetson_alert_dispatcher import JetsonAlertDispatcher
+from modules.module_audio_alert import AudioAlertConfig, AudioAlertNotifier
+from modules.module_event_router import EventRouter
+from modules.module_face_landmarker import (
+    LEFT_EYE_EAR_INDICES,
+    RIGHT_EYE_EAR_INDICES,
+    calculate_ear,
+    draw_landmarks_on_image,
+    get_head_vertical_position,
+)
+from modules.module_env_init import env_bool, env_bool_first, env_int
+from modules.module_gpu_preprocessor import CUDA_AVAILABLE, CUDA_INFO, GpuPreprocessor
+from modules.module_imu_speed_monitor import IMUSpeedMonitor, IMUSpeedMonitorConfig
+from modules.module_latest_frame_reader import LatestFrameReader
+from modules.module_model_downloader import download_model
+from modules.module_web_socket import WebSocketBroadcaster
+from modules.module_alarm import Alarm
 
 # Model download setup
 MODEL_DIR = "../model/facenet_vpruned_quantized_v2.0.1"
 MODEL_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
-
-def download_model(url, path):
-    """Download model if not exists"""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if not os.path.exists(path):
-        print(f"Downloading {os.path.basename(path)} (~5MB)...")
-        urllib.request.urlretrieve(url, path)
-        print("Download complete!")
-    else:
-        print(f"Model found at {path}")
-
-# Download/check model
 download_model(MODEL_URL, MODEL_PATH)
 
-VIDEO_SOURCE = 0
+# ── Video Parameters ──
+try:
+    VIDEO_SOURCE = int(os.environ.get("MP_VIDEO_SOURCE", "0"))
+except ValueError:
+    VIDEO_SOURCE = os.environ.get("MP_VIDEO_SOURCE")
 CAMERA_BUFFER_SIZE = max(1, env_int("MP_CAMERA_BUFFER_SIZE", 1))
 CAMERA_TARGET_FPS = env_int("MP_CAMERA_TARGET_FPS", 30)
 CAPTURE_QUEUE_SIZE = max(1, env_int("MP_CAPTURE_QUEUE_SIZE", 1))
@@ -268,6 +57,15 @@ WS_PORT = env_int("MP_WS_PORT", 8765)
 
 # ── MQTT Uplink Parameters (primary integration path) ──
 MQTT_ENABLED = env_bool_first(["MP_MQTT_ENABLED", "MP_QTT_ENABLED", "MPMQTT_ENABLED", "MPQTT_ENABLED"], True)
+
+# ── BLE Direct-to-Driver Parameters ──
+BLE_ENABLED = env_bool("MP_BLE_ENABLED", True)
+
+# ── GPU / Benchmark Parameters ──
+# Set MP_BENCHMARK=1 to run both CPU and GPU preprocessing every 100 frames
+# and print a side-by-side comparison at the end.
+BENCHMARK_MODE = env_bool("MP_BENCHMARK", False)
+BENCHMARK_INTERVAL = env_int("MP_BENCHMARK_INTERVAL", 100)  # compare every N frames
 
 # ── EAR (Eye Aspect Ratio) Parameters ──
 EAR_THRESHOLD = 0.21          # Below this = eyes closed (lowered for better sensitivity)
@@ -289,6 +87,9 @@ TOTAL_BLINKS = 0
 BLINK_COUNTER = 0
 START_TIME = time.time()
 
+# ── Set up local USB alarm ──
+ALERT = Alarm()
+
 # Drowsiness state
 EYES_CLOSED_START = None
 DROWSY_ALERT_ACTIVE = False
@@ -302,17 +103,14 @@ head_deviated_start = None        # when head first deviated
 HEAD_INATTENTION_ACTIVE = False
 HEAD_INATTENTION_COUNT = 0
 
-event_sinks = []
-event_sequence = 0
-event_sequence_lock = threading.Lock()
-
 ws_broadcaster = None
+sinks = []
 if WS_ENABLED:
     ws_broadcaster = WebSocketBroadcaster(host=WS_HOST, port=WS_PORT)
     if not ws_broadcaster.start():
         ws_broadcaster = None
     else:
-        event_sinks.append(ws_broadcaster)
+        sinks.append(ws_broadcaster)
 
 dispatcher = None
 if MQTT_ENABLED:
@@ -320,70 +118,101 @@ if MQTT_ENABLED:
     if not dispatcher.connect():
         dispatcher = None
 
-if not event_sinks and dispatcher is None:
-    print("Warning: no event sink enabled. Alerts will not be forwarded.")
+# ── BLE notifier (direct-to-driver alerts) ──
+ble_notifier = None
+if BLE_ENABLED:
+    try:
+        from ble.ble_notifier import BLENotifier
+        ble_notifier = BLENotifier()
+        ble_notifier.start()
+    except Exception as exc:
+        print(f"BLE disabled: {exc}")
+        ble_notifier = None
+
+sound_notifier = None
+audio_config = AudioAlertConfig.from_env()
+if audio_config.enabled:
+    try:
+        sound_notifier = AudioAlertNotifier(router=None, config=audio_config)
+    except Exception:
+        sound_notifier = None
+
+router = EventRouter(
+    source_id=EVENT_SOURCE_ID,
+    producer=EVENT_PRODUCER,
+    schema_version=EVENT_SCHEMA_VERSION,
+    dispatcher=dispatcher,
+    ble_notifier=ble_notifier,
+    sound_notifier=sound_notifier,
+    sinks=sinks,
+)
+
+if sound_notifier is not None:
+    sound_notifier.router = router
+    try:
+        sound_notifier.start()
+    except Exception as exc:
+        router.emit_log(f"Audio alerts disabled: {exc}", level="error")
+        sound_notifier = None
+        router.sound_notifier = None
+
+imu_monitor = None
+imu_config = IMUSpeedMonitorConfig.from_env()
+if imu_config.enabled:
+    try:
+        imu_monitor = IMUSpeedMonitor(router=router, config=imu_config)
+        imu_monitor.start()
+    except Exception as exc:
+        router.emit_log(f"IMU disabled: {exc}", level="error")
+        imu_monitor = None
+
+if not sinks and dispatcher is None and ble_notifier is None:
+    router.emit_log("Warning: no event sink enabled. Alerts will not be forwarded.")
 
 
-def emit_event(event_type, **payload):
-    """Emit a structured event to all configured sinks."""
-    if not event_sinks:
+def _video_sources_to_try(source):
+    if isinstance(source, int):
+        yield source
+        for index in range(10):
+            if index != source:
+                yield index
         return
-    global event_sequence
-    with event_sequence_lock:
-        event_sequence += 1
-        sequence = event_sequence
-    event = {
-        "type": event_type,
-        "event_type": event_type,
-        "timestamp": utc_timestamp(),
-        "event_id": str(uuid.uuid4()),
-        "event_version": EVENT_SCHEMA_VERSION,
-        "source_id": EVENT_SOURCE_ID,
-        "producer": EVENT_PRODUCER,
-        "sequence": sequence,
-        **payload,
-    }
-    for sink in event_sinks:
-        sink.send(event)
+
+    yield source
 
 
-def emit_log(message, level="info", **data):
-    """Print log data locally."""
-    print(message)
+def _open_camera_source(source, attempts=25, delay_s=0.2):
+    for attempt in range(1, attempts + 1):
+        for candidate in _video_sources_to_try(source):
+            cap = cv2.VideoCapture(candidate, cv2.CAP_V4L2)
+            if cap.isOpened():
+                # Make sure the device is actually producing frames, not just opening.
+                success, _frame = cap.read()
+                if success:
+                    router.emit_log(
+                        f"Camera opened on source {candidate!r} after attempt {attempt}/{attempts}"
+                    )
+                    return cap
+            cap.release()
+        time.sleep(delay_s)
+
+    # Final fallback: scan all local V4L2 nodes that may have appeared late.
+    for device in sorted(Path("/dev").glob("video*")):
+        cap = cv2.VideoCapture(str(device), cv2.CAP_V4L2)
+        if cap.isOpened():
+            success, _frame = cap.read()
+            if success:
+                router.emit_log(f"Camera opened on fallback device {device}")
+                return cap
+        cap.release()
+
+    return None
 
 
-def severity_to_level(severity):
-    """Map string severities to numeric dispatcher levels."""
-    mapping = {
-        "info": 0,
-        "warning": 1,
-        "high": 2,
-        "critical": 2,
-    }
-    return mapping.get(str(severity).lower(), 1)
+cap = _open_camera_source(VIDEO_SOURCE)
 
-
-def emit_alert(code, message, severity="warning", **data):
-    """Emit alert payload to all configured event sinks."""
-    payload = {"code": code, "message": message, "severity": severity}
-    if data:
-        payload["data"] = data
-    emit_event("alert", **payload)
-    if dispatcher is not None:
-        metadata = {"code": code, "severity": severity}
-        metadata.update(data)
-        ok = dispatcher.publish_alert(
-            level=severity_to_level(severity),
-            message=message,
-            metadata=metadata,
-        )
-        emit_log(f"MQTT publish ok={ok} code={code} message={message}")
-
-
-cap = cv2.VideoCapture(VIDEO_SOURCE)
-
-if not cap.isOpened():
-    emit_log(f"Error: Could not open video source {VIDEO_SOURCE}", level="error")
+if cap is None or not cap.isOpened():
+    router.emit_log(f"Error: Could not open video source {VIDEO_SOURCE}", level="error")
     exit()
 
 buffer_set_ok = cap.set(cv2.CAP_PROP_BUFFERSIZE, CAMERA_BUFFER_SIZE)
@@ -398,13 +227,34 @@ width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 buffer_size_after = cap.get(cv2.CAP_PROP_BUFFERSIZE)
 
-emit_log(f"Video info: {width}x{height} @ {fps} FPS")
-emit_log(
+router.emit_log(f"Video info: {width}x{height} @ {fps} FPS")
+router.emit_log(
     f"Latency config: buffer_set_ok={buffer_set_ok} buffer_size={buffer_size_after} "
     f"capture_queue={CAPTURE_QUEUE_SIZE} display={DISPLAY_ENABLED} "
     f"save_output={SAVE_OUTPUT_VIDEO} target_fps={CAMERA_TARGET_FPS}"
 )
-emit_log(f"Using model: {MODEL_PATH}")
+router.emit_log(f"Using model: {MODEL_PATH}")
+
+# ── GPU Preprocessor ──
+gpu_preprocessor = GpuPreprocessor(use_gpu=CUDA_AVAILABLE)
+cpu_preprocessor = GpuPreprocessor(use_gpu=False)  # always-CPU for benchmarking
+
+if CUDA_AVAILABLE:
+    router.emit_log(
+        f"CUDA ENABLED: {CUDA_INFO['device_count']} device(s) detected — "
+        f"preprocessing will run on GPU"
+    )
+else:
+    router.emit_log(
+        "CUDA not available: preprocessing will run on CPU. "
+        "For GPU acceleration, install OpenCV built with CUDA support."
+    )
+
+if BENCHMARK_MODE:
+    router.emit_log(
+        f"BENCHMARK MODE ON: comparing CPU vs {gpu_preprocessor.backend_label} "
+        f"every {BENCHMARK_INTERVAL} frames"
+    )
 
 # Setup output video
 out = None
@@ -412,7 +262,7 @@ if SAVE_OUTPUT_VIDEO:
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(OUTPUT_VIDEO_PATH, fourcc, int(fps), (width, height))
     if not out.isOpened():
-        emit_log(f"Warning: failed to open output video '{OUTPUT_VIDEO_PATH}'. Disabling writer.")
+        router.emit_log(f"Warning: failed to open output video '{OUTPUT_VIDEO_PATH}'. Disabling writer.")
         out = None
 
 # Create FaceLandmarker options
@@ -427,88 +277,6 @@ options = vision.FaceLandmarkerOptions(
 )
 
 
-def calculate_ear(face_landmarks, indices, image_shape):
-    """
-    Calculate Eye Aspect Ratio (EAR).
-    Uses 6 landmark points: 2 corner + 4 vertical.
-    """
-    def get_coords(idx):
-        return (face_landmarks[idx].x * image_shape[1],
-                face_landmarks[idx].y * image_shape[0])
-
-    p1 = get_coords(indices[0])  # left corner
-    p2 = get_coords(indices[1])  # top-1
-    p3 = get_coords(indices[2])  # top-2
-    p4 = get_coords(indices[3])  # right corner
-    p5 = get_coords(indices[4])  # bottom-2
-    p6 = get_coords(indices[5])  # bottom-1
-
-    v1 = math.hypot(p2[0] - p6[0], p2[1] - p6[1])
-    v2 = math.hypot(p3[0] - p5[0], p3[1] - p5[1])
-    h  = math.hypot(p1[0] - p4[0], p1[1] - p4[1])
-
-    if h == 0:
-        return 0.0
-    return (v1 + v2) / (2.0 * h)
-
-
-def get_head_vertical_position(face_landmarks):
-    """
-    Get a normalized vertical position of the head using the nose tip (landmark 1).
-    Returns the raw normalized y coordinate (0=top, 1=bottom).
-    We use the nose tip relative to the face bounding box to be scale-invariant.
-    """
-    # Nose tip
-    nose_y = face_landmarks[1].y
-
-    # Use forehead (10) and chin (152) to normalize within the face
-    forehead_y = face_landmarks[10].y
-    chin_y = face_landmarks[152].y
-    face_height = abs(chin_y - forehead_y)
-
-    if face_height < 0.001:
-        return nose_y  # fallback
-
-    # Nose position relative to forehead-chin range
-    # 0 = at forehead level, 1 = at chin level
-    # When head tilts down, nose_y increases relative to forehead
-    relative_y = (nose_y - forehead_y) / face_height
-    return relative_y
-
-
-def draw_landmarks_on_image(image, detection_result):
-    """Draw face landmarks on the image"""
-    if not detection_result.face_landmarks:
-        return image
-
-    annotated_image = image.copy()
-
-    for face_landmarks in detection_result.face_landmarks:
-        for landmark in face_landmarks:
-            x = int(landmark.x * image.shape[1])
-            y = int(landmark.y * image.shape[0])
-            cv2.circle(annotated_image, (x, y), 1, (0, 255, 0), -1)
-
-        left_eye_indices = [33, 160, 158, 133, 153, 144, 33]
-        right_eye_indices = [362, 385, 387, 263, 373, 380, 362]
-
-        for eye_indices in [left_eye_indices, right_eye_indices]:
-            for i in range(len(eye_indices) - 1):
-                pt1 = face_landmarks[eye_indices[i]]
-                pt2 = face_landmarks[eye_indices[i + 1]]
-                x1 = int(pt1.x * image.shape[1])
-                y1 = int(pt1.y * image.shape[0])
-                x2 = int(pt2.x * image.shape[1])
-                y2 = int(pt2.y * image.shape[0])
-                cv2.line(annotated_image, (x1, y1), (x2, y2), (255, 0, 0), 1)
-
-    return annotated_image
-
-
-# MediaPipe landmark indices for EAR
-LEFT_EYE_EAR_INDICES  = [33, 160, 158, 133, 153, 144]
-RIGHT_EYE_EAR_INDICES = [362, 385, 387, 263, 373, 380]
-
 # ── Main Loop ──
 frame_count = 0
 frame_reader = LatestFrameReader(cap, queue_size=CAPTURE_QUEUE_SIZE)
@@ -520,15 +288,22 @@ try:
             timestamp_ms, frame = frame_reader.read(timeout=1.0)
             if frame is None:
                 if frame_reader.stop_event.is_set():
-                    emit_log("Frame reader stopped: camera stream ended.")
+                    router.emit_log("Frame reader stopped: camera stream ended.")
                     break
                 continue
 
             frame_count += 1
 
+            # ── Preprocessing (GPU-accelerated when available) ──
+            rgb_frame = gpu_preprocessor.bgr_to_rgb(frame)
+
+            # Benchmark: also run CPU path on the same frame for comparison
+            if BENCHMARK_MODE and frame_count % BENCHMARK_INTERVAL == 0:
+                cpu_preprocessor.bgr_to_rgb(frame)
+
             mp_image = mp.Image(
                 image_format=mp.ImageFormat.SRGB,
-                data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                data=rgb_frame
             )
 
             detection_result = landmarker.detect_for_video(mp_image, timestamp_ms)
@@ -558,8 +333,8 @@ try:
                                 DROWSY_EVENT_COUNT += 1
                                 message = (f"DROWSINESS DETECTED! Event #{DROWSY_EVENT_COUNT}"
                                            f" (eyes closed {closed_duration:.1f}s)")
-                                emit_log(message, level="warning")
-                                emit_alert(
+                                router.emit_log(message, level="warning")
+                                router.emit_alert(
                                     "drowsiness_detected",
                                     message,
                                     severity="critical",
@@ -568,6 +343,7 @@ try:
                                     ear=round(ear, 3),
                                     blink_ms=int(closed_duration * 1000),
                                 )
+                                ALERT.start_background()
                             DROWSY_ALERT_ACTIVE = True
                 else:
                     # Eyes open — check if we just finished a blink
@@ -592,7 +368,7 @@ try:
                     head_baseline_samples.append(head_smoothed_y)
                     if len(head_baseline_samples) == HEAD_BASELINE_WINDOW:
                         head_baseline_y = np.mean(head_baseline_samples)
-                        emit_log(
+                        router.emit_log(
                             f"Head baseline calibrated: {head_baseline_y:.4f}"
                             f" (from {HEAD_BASELINE_WINDOW} frames)"
                         )
@@ -613,8 +389,8 @@ try:
                                         f"HEAD INATTENTION DETECTED! Event #{HEAD_INATTENTION_COUNT}"
                                         f" (deviated {deviated_duration:.1f}s)"
                                     )
-                                    emit_log(message, level="warning")
-                                    emit_alert(
+                                    router.emit_log(message, level="warning")
+                                    router.emit_alert(
                                         "head_inattention_detected",
                                         message,
                                         severity="high",
@@ -670,15 +446,17 @@ try:
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
 
-            if frame_count % 100 == 0:
+            if frame_count % 10 == 0:
                 lag_ms = max(0, int(time.time() * 1000) - timestamp_ms)
-                emit_log(
+                pp_stats = gpu_preprocessor.stats()
+                router.emit_log(
                     f"Processed {frame_count} frames | "
                     f"capture_read={frame_reader.frames_read} dropped={frame_reader.frames_dropped} "
-                    f"lag_ms={lag_ms}"
+                    f"lag_ms={lag_ms} preprocess={pp_stats['backend']} "
+                    f"avg_pp_ms={pp_stats['avg_preprocess_ms']}"
                 )
 except KeyboardInterrupt:
-    emit_log("Interrupted by user", level="warning")
+    router.emit_log("Interrupted by user", level="warning")
 finally:
     frame_reader.stop()
     cap.release()
@@ -686,14 +464,50 @@ finally:
         out.release()
     if DISPLAY_ENABLED:
         cv2.destroyAllWindows()
+    if imu_monitor is not None:
+        imu_monitor.stop()
+    if sound_notifier is not None:
+        sound_notifier.stop()
     if ws_broadcaster is not None:
         ws_broadcaster.stop()
     if dispatcher is not None:
         dispatcher.close()
+    if ble_notifier is not None:
+        ble_notifier.stop()
 
-emit_log(f"\n{'='*50}")
-emit_log(f"Processing complete! Total frames: {frame_count}")
-emit_log(f"Total Blinks: {TOTAL_BLINKS}")
-emit_log(f"Eye Closure Events: {DROWSY_EVENT_COUNT}")
-emit_log(f"Head Inattention Events: {HEAD_INATTENTION_COUNT}")
-emit_log(f"{'='*50}")
+router.emit_log(f"\n{'='*50}")
+router.emit_log(f"Processing complete! Total frames: {frame_count}")
+router.emit_log(f"Total Blinks: {TOTAL_BLINKS}")
+router.emit_log(f"Eye Closure Events: {DROWSY_EVENT_COUNT}")
+router.emit_log(f"Head Inattention Events: {HEAD_INATTENTION_COUNT}")
+if imu_monitor is not None:
+    router.emit_log(f"IMU Speeding Events: {imu_monitor.event_count}")
+
+# ── Preprocessing Performance Summary ──
+gpu_stats = gpu_preprocessor.stats()
+router.emit_log(f"\nPreprocessing backend: {gpu_stats['backend']}")
+router.emit_log(
+    f"  Total frames preprocessed: {gpu_stats['frames_processed']}  "
+    f"Avg: {gpu_stats['avg_preprocess_ms']:.4f} ms/frame  "
+    f"Total: {gpu_stats['total_preprocess_s']:.4f} s"
+)
+
+if BENCHMARK_MODE:
+    cpu_stats = cpu_preprocessor.stats()
+    router.emit_log(f"\n{'─'*50}")
+    router.emit_log(f"  BENCHMARK RESULTS (CPU vs {gpu_stats['backend']})")
+    router.emit_log(f"{'─'*50}")
+    router.emit_log(
+        f"  CPU:  {cpu_stats['avg_preprocess_ms']:.4f} ms/frame  "
+        f"({cpu_stats['frames_processed']} samples)"
+    )
+    router.emit_log(
+        f"  {gpu_stats['backend']}:  {gpu_stats['avg_preprocess_ms']:.4f} ms/frame  "
+        f"({gpu_stats['frames_processed']} samples)"
+    )
+    if cpu_stats['avg_preprocess_ms'] > 0 and gpu_stats['avg_preprocess_ms'] > 0:
+        speedup = cpu_stats['avg_preprocess_ms'] / gpu_stats['avg_preprocess_ms']
+        router.emit_log(f"  Speedup: {speedup:.2f}x")
+    router.emit_log(f"{'─'*50}")
+
+router.emit_log(f"{'='*50}")
