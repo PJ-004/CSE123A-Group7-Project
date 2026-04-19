@@ -58,6 +58,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
 
   String _latestAlertLevel = 'None';
   String _jetsonDeviceState = 'Offline';
+  String _eyesState = 'Unknown';
   DateTime? _jetsonLastSeen;
   final List<_DashboardAlert> _alerts = [];
   static const Duration _jetsonStaleAfter = Duration(seconds: 30);
@@ -169,6 +170,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     setState(() {
       _jetsonLastSeen = presence.timestamp;
       _jetsonDeviceState = presence.online ? 'Online' : 'Offline';
+      _eyesState = presence.eyeState ?? (presence.online ? _eyesState : 'Unknown');
     });
   }
 
@@ -183,6 +185,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
       if (stale && _jetsonDeviceState != 'Offline') {
         setState(() {
           _jetsonDeviceState = 'Offline';
+          _eyesState = 'Unknown';
         });
       }
     });
@@ -388,8 +391,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
                     label: "Jetson Device",
                     value: _jetsonDeviceState,
                   ),
-                  const _StatusChip(label: "Face", value: "Detected"),
-                  const _StatusChip(label: "Eyes", value: "Open"),
+                  _StatusChip(label: "Eyes", value: _eyesState),
                   _StatusChip(label: "Alert", value: _latestAlertLevel),
                   _StatusChip(
                     label: "Lat",

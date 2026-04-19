@@ -94,6 +94,7 @@ ALERT = Alarm()
 EYES_CLOSED_START = None
 DROWSY_ALERT_ACTIVE = False
 DROWSY_EVENT_COUNT = 0
+LAST_EYE_STATE = "Unknown"
 
 # Head attention state
 head_baseline_samples = []        # samples during calibration
@@ -168,6 +169,19 @@ if imu_config.enabled:
 
 if not sinks and dispatcher is None and ble_notifier is None:
     router.emit_log("Warning: no event sink enabled. Alerts will not be forwarded.")
+
+
+def _publish_eye_state_if_changed(next_state, ear=None):
+    global LAST_EYE_STATE
+
+    if next_state == LAST_EYE_STATE:
+        return
+
+    LAST_EYE_STATE = next_state
+    metadata = {"eye_state": next_state}
+    if ear is not None:
+        metadata["ear"] = round(ear, 3)
+    router.emit_presence(online=True, **metadata)
 
 
 def _video_sources_to_try(source):
@@ -321,6 +335,7 @@ try:
                 ear = (left_ear + right_ear) / 2.0
 
                 if ear < EAR_THRESHOLD:
+                    _publish_eye_state_if_changed("Closed", ear=ear)
                     BLINK_COUNTER += 1
 
                     # Drowsiness: track how long eyes have been closed
@@ -347,6 +362,7 @@ try:
                             DROWSY_ALERT_ACTIVE = True
                 else:
                     # Eyes open — check if we just finished a blink
+                    _publish_eye_state_if_changed("Open", ear=ear)
                     if BLINK_COUNTER >= EAR_CONSEC_FRAMES:
                         TOTAL_BLINKS += 1
                     BLINK_COUNTER = 0
@@ -435,6 +451,7 @@ try:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
             else:
+                _publish_eye_state_if_changed("Unknown")
                 cv2.putText(annotated_frame, "No Face Detected - Highly Likely Driver Is Asleep", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 

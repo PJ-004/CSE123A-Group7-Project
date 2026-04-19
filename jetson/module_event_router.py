@@ -92,3 +92,12 @@ class EventRouter:
             ok = self.sound_notifier.send_alert(level, message, code=code)
             if ok:
                 self.emit_log(f"Audio alert sent code={code}")
+
+    def emit_presence(self, online=True, **metadata):
+        """Publish a presence/status update through MQTT when available."""
+        if self.dispatcher is None:
+            return False
+
+        ok = self.dispatcher.publish_presence(online=online, metadata=metadata)
+        self.emit_log(f"Presence publish ok={ok} online={online} metadata={metadata}")
+        return ok
