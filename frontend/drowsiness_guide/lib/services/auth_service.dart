@@ -1,10 +1,14 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
-  final GoogleSignIn _googleSignIn = GoogleSignIn(
-    clientId: '684595439219-e4iuvufc616pb2qui0gtlsrn6qd79mid.apps.googleusercontent.com.apps.googleusercontent.com',
+
+  late final GoogleSignIn _googleSignIn = GoogleSignIn(
+    clientId: kIsWeb
+        ? '684595439219-k8abgiacuuabdju54o0jdpoohbak30de.apps.googleusercontent.com'
+        : null,
   );
 
   User? get currentUser => _auth.currentUser;
@@ -12,8 +16,12 @@ class AuthService {
   Stream<User?> get authStateChanges => _auth.authStateChanges();
 
   Future<UserCredential?> signInWithGoogle() async {
-    final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
+    if (kIsWeb) {
+      final googleProvider = GoogleAuthProvider();
+      return await _auth.signInWithPopup(googleProvider);
+    }
 
+    final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
     if (googleUser == null) {
       return null;
     }
@@ -29,8 +37,30 @@ class AuthService {
     return await _auth.signInWithCredential(credential);
   }
 
+  Future<UserCredential> signInWithEmailPassword({
+    required String email,
+    required String password,
+  }) async {
+    return await _auth.signInWithEmailAndPassword(
+      email: email,
+      password: password,
+    );
+  }
+
+  Future<UserCredential> createUserWithEmailPassword({
+    required String email,
+    required String password,
+  }) async {
+    return await _auth.createUserWithEmailAndPassword(
+      email: email,
+      password: password,
+    );
+  }
+
   Future<void> signOut() async {
-    await _googleSignIn.signOut();
+    if (!kIsWeb) {
+      await _googleSignIn.signOut();
+    }
     await _auth.signOut();
   }
 }

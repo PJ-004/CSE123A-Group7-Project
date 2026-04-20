@@ -6,6 +6,7 @@ import '../services/ble_service.dart';
 import '../services/jetson_websocket_service.dart';
 import '../secrets.dart';
 import '../app.dart';
+import '../services/auth_service.dart';
 
 // -------------------- Color System --------------------
 
@@ -58,7 +59,6 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
 
   String _latestAlertLevel = 'None';
   String _jetsonDeviceState = 'Offline';
-  String _eyesState = 'Unknown';
   DateTime? _jetsonLastSeen;
   final List<_DashboardAlert> _alerts = [];
   static const Duration _jetsonStaleAfter = Duration(seconds: 30);
@@ -170,7 +170,6 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     setState(() {
       _jetsonLastSeen = presence.timestamp;
       _jetsonDeviceState = presence.online ? 'Online' : 'Offline';
-      _eyesState = presence.eyeState ?? (presence.online ? _eyesState : 'Unknown');
     });
   }
 
@@ -185,7 +184,6 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
       if (stale && _jetsonDeviceState != 'Offline') {
         setState(() {
           _jetsonDeviceState = 'Offline';
-          _eyesState = 'Unknown';
         });
       }
     });
@@ -270,6 +268,17 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
       });
     }
   }
+  Future<void> _backToLogin() async {
+    await AuthService().signOut();
+
+    if (!mounted) return;
+
+    Navigator.pushNamedAndRemoveUntil(
+      context,
+      '/login',
+      (route) => false,
+    );
+  }
 
   Future<void> _loadWeather(double lat, double lon) async {
     if (_weatherLoading) return;
@@ -340,7 +349,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
                   : _bleState == 'Scanning…' || _bleState == 'Connecting…'
                   ? Icons.bluetooth_searching
                   : Icons.bluetooth,
-              color: _bleState == 'Connected' ? _accentBlue : Colors.black,
+              color: _bleState == 'Connected' ? _accentBlue : iconColor,
             ),
           ),
           IconButton(
@@ -356,12 +365,17 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
                   : Icons.wifi_tethering_off,
               color: _wsIsConnected(_jetsonWsState)
                   ? _accentBlue
-                  : Colors.black,
+                  : iconColor,
             ),
           ),
           IconButton(
             onPressed: _loadLocationOnce,
-            icon: const Icon(Icons.my_location, color: Colors.black),
+            icon:  Icon(Icons.my_location, color: iconColor),
+          ),
+          IconButton(
+            onPressed: _backToLogin,
+            tooltip: 'Back to login',
+            icon: Icon(Icons.logout, color: iconColor),
           ),
         ],
       ),
@@ -391,7 +405,8 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
                     label: "Jetson Device",
                     value: _jetsonDeviceState,
                   ),
-                  _StatusChip(label: "Eyes", value: _eyesState),
+                  const _StatusChip(label: "Face", value: "Detected"),
+                  const _StatusChip(label: "Eyes", value: "Open"),
                   _StatusChip(label: "Alert", value: _latestAlertLevel),
                   _StatusChip(
                     label: "Lat",
@@ -450,7 +465,8 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
               ),
               child: InkWell(
                 borderRadius: BorderRadius.circular(16),
-                onTap: () => Navigator.pushNamed(context, '/map'),
+                onTap: () =>
+                    Navigator.pushNamed(context, '/map'),
                 child: const Center(
                   child: Text(
                     'DROWSINESS DETECTED',
