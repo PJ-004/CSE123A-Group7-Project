@@ -1,9 +1,12 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'screens/fleet_operator_dashboard.dart';
 import 'screens/live_monitor_screen.dart';
 import 'screens/drowsiness_detected_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/osm_map_screen.dart';
+import 'screens/role_selection_screen.dart';
+import 'services/user_role_service.dart';
 
 class DriverSafetyApp extends StatefulWidget {
   const DriverSafetyApp({super.key});
@@ -84,6 +87,15 @@ class _DriverSafetyAppState extends State<DriverSafetyApp> {
         '/dashboard': (context) => const LiveMonitorScreen(),
         '/drowsiness-detected': (context) => const DrowsinessDetectedScreen(),
         '/map': (context) => const OSMMapScreen(),
+        '/fleet-dashboard': (context) => const FleetOperatorDashboard(),
+        '/select-role': (context) {
+          final args = ModalRoute.of(context)!.settings.arguments
+              as Map<String, String?>?;
+          return RoleSelectionScreen(
+            email: args?['email'],
+            password: args?['password'],
+          );
+        },
       },
 
       home: StreamBuilder<User?>(
@@ -96,7 +108,23 @@ class _DriverSafetyAppState extends State<DriverSafetyApp> {
           }
 
           if (snapshot.hasData) {
-            return const LiveMonitorScreen();
+            return FutureBuilder<String?>(
+              future: UserRoleService().fetchRole(snapshot.data!.uid),
+              builder: (context, roleSnapshot) {
+                if (roleSnapshot.connectionState == ConnectionState.waiting) {
+                  return const Scaffold(
+                    body: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                if (roleSnapshot.data == 'operator') {
+                  return const FleetOperatorDashboard();
+                }
+                if (roleSnapshot.data == null) {
+                  return const RoleSelectionScreen(email: null, password: null);
+                }
+                return const LiveMonitorScreen();
+              },
+            );
           }
 
           return const LoginScreen();
