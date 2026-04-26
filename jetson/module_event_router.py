@@ -1,7 +1,7 @@
 import threading
 import uuid
 
-from module_env_init import utc_timestamp
+from modules.module_env_init import utc_timestamp
 
 
 def severity_to_level(severity):
@@ -89,15 +89,5 @@ class EventRouter:
             self.emit_log(f"BLE alert sent code={code}")
 
         if self.sound_notifier is not None:
-            ok = self.sound_notifier.send_alert(level, message, code=code)
-            if ok:
-                self.emit_log(f"Audio alert sent code={code}")
-
-    def emit_presence(self, online=True, **metadata):
-        """Publish a presence/status update through MQTT when available."""
-        if self.dispatcher is None:
-            return False
-
-        ok = self.dispatcher.publish_presence(online=online, metadata=metadata)
-        self.emit_log(f"Presence publish ok={ok} online={online} metadata={metadata}")
-        return ok
+            self.sound_notifier.send_alert(level, message)
+            self.emit_log(f"Sound alert sent code={code}")
