@@ -1,5 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
+
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 class OSMPlacesService {
@@ -14,6 +16,14 @@ class OSMPlacesService {
   static final Map<String, DateTime> _lastAttemptAt = <String, DateTime>{};
   static final Map<String, Future<List<PlaceSummary>>> _inFlight =
       <String, Future<List<PlaceSummary>>>{};
+
+  /// Clears in-memory caches so widget tests stay deterministic.
+  @visibleForTesting
+  static void clearCachesForTesting() {
+    _cache.clear();
+    _lastAttemptAt.clear();
+    _inFlight.clear();
+  }
 
   Future<List<PlaceSummary>> fetchNearestGasStations({
     required double lat,

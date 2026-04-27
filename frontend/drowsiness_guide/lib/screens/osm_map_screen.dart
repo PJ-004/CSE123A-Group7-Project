@@ -409,16 +409,19 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
         title: const Text('Map'),
         actions: [
           IconButton(
+            key: const ValueKey('mapReCenter'),
             tooltip: 'Re-center',
             onPressed: me == null ? null : () => _mapController.move(me, 15),
             icon: const Icon(Icons.my_location),
           ),
           IconButton(
+            key: const ValueKey('mapReRoute'),
             tooltip: 'Re-route',
             onPressed: (_pos != null && _dest != null) ? _buildRoute : null,
             icon: const Icon(Icons.alt_route),
           ),
           IconButton(
+            key: const ValueKey('mapReloadStops'),
             tooltip: 'Reload stops',
             onPressed: _pos == null || _loadingStops ? null : _loadStops,
             icon: const Icon(Icons.local_gas_station),
@@ -597,6 +600,7 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                                     height: 48,
                                     width: 48,
                                     child: IconButton(
+                                      key: const ValueKey('mapNavigateMain'),
                                       style: IconButton.styleFrom(
                                         backgroundColor: _brandBlue,
                                         foregroundColor: Colors.white,
@@ -615,6 +619,7 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                                   SizedBox(
                                     height: 48,
                                     child: FilledButton(
+                                      key: const ValueKey('mapMoreStops'),
                                       style: FilledButton.styleFrom(
                                         backgroundColor: _showOtherStops
                                             ? Colors.grey.shade600

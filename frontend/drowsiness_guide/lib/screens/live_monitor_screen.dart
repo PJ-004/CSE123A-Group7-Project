@@ -5,7 +5,6 @@ import '../services/weather_service.dart';
 import '../services/ble_service.dart';
 import '../services/jetson_websocket_service.dart';
 import '../secrets.dart';
-import '../app.dart';
 import '../services/auth_service.dart';
 
 // -------------------- Color System --------------------
@@ -350,7 +349,11 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
 
   @override
   Widget build(BuildContext context) {
+<<<<<<< HEAD
     final isDark = DriverSafetyApp.maybeOf(context)?.isDark ?? true;
+=======
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+>>>>>>> 95aeab0 (test cases for Maps screen)
     final bgTop = isDark ? const Color(0xFF0B1220) : const Color(0xFFCED8E4);
     final bgBottom = isDark ? const Color(0xFF0E1628) : const Color(0xFF7E97B9);
     final titleColor = isDark ? Colors.white : Colors.black;
@@ -502,6 +505,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
                 borderRadius: BorderRadius.circular(16),
               ),
               child: InkWell(
+                key: const ValueKey('drowsinessDetectedBar'),
                 borderRadius: BorderRadius.circular(16),
                 onTap: () =>
                     Navigator.pushNamed(context, '/map'),
@@ -678,6 +682,7 @@ class _StatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
+      constraints: const BoxConstraints(maxWidth: 320),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: _surface,
@@ -685,7 +690,6 @@ class _StatusChip extends StatelessWidget {
         border: Border.all(color: _border), // <-- not const (works across SDKs)
       ),
       child: Row(
-        mainAxisSize: MainAxisSize.min,
         children: [
           Container(
             width: 8,
@@ -696,10 +700,26 @@ class _StatusChip extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          Text("$label: ", style: TextStyle(color: _black(0.55))),
-          Text(
-            value,
-            style: TextStyle(color: _black(0.8), fontWeight: FontWeight.w700),
+          Expanded(
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: '$label: ',
+                    style: TextStyle(color: _black(0.55)),
+                  ),
+                  TextSpan(
+                    text: value,
+                    style: TextStyle(
+                      color: _black(0.8),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
         ],
       ),
