@@ -19,7 +19,24 @@ const _border = Color(0x1A000000);
 // -----------------------------------------------------
 
 class LiveMonitorScreen extends StatefulWidget {
-  const LiveMonitorScreen({super.key});
+  const LiveMonitorScreen({
+    super.key,
+    this.bleService,
+    this.jetsonWsService,
+    this.locationLoader,
+    this.weatherLoader,
+    this.jetsonWsUrl,
+  });
+
+  final BleService? bleService;
+  final JetsonWebSocketService? jetsonWsService;
+  final Future<({double lat, double lon})> Function()? locationLoader;
+  final Future<({String condition, String tempText})> Function(
+    double lat,
+    double lon,
+  )?
+  weatherLoader;
+  final String? jetsonWsUrl;
 
   @override
   State<LiveMonitorScreen> createState() => _LiveMonitorScreenState();
@@ -27,10 +44,11 @@ class LiveMonitorScreen extends StatefulWidget {
 
 class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     with WidgetsBindingObserver {
-  static const String _jetsonWsUrl = String.fromEnvironment(
+  static const String _defaultJetsonWsUrl = String.fromEnvironment(
     'JETSON_WS_URL',
     defaultValue: 'ws://localhost:8080/ws/alerts?replay=0',
   );
+  late final String _jetsonWsUrl;
   String? _latText;
   String? _lonText;
   String? _locErr;
@@ -42,15 +60,13 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   bool _weatherLoading = false;
 
   // ── BLE ──
-  final BleService _ble = BleService();
+  late final BleService _ble;
   String _bleState = 'Disconnected';
   StreamSubscription? _bleStateSub;
   StreamSubscription? _bleAlertSub;
 
   // ── Jetson WebSocket ──
-  final JetsonWebSocketService _jetsonWs = JetsonWebSocketService(
-    uri: Uri.parse(_jetsonWsUrl),
-  );
+  late final JetsonWebSocketService _jetsonWs;
   String _jetsonWsState = 'Disconnected';
   StreamSubscription? _jetsonWsStateSub;
   StreamSubscription? _jetsonWsAlertSub;
@@ -71,6 +87,11 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _jetsonWsUrl = widget.jetsonWsUrl ?? _defaultJetsonWsUrl;
+    _ble = widget.bleService ?? BleService();
+    _jetsonWs =
+        widget.jetsonWsService ??
+        JetsonWebSocketService(uri: Uri.parse(_jetsonWsUrl));
     _loadLocationOnce();
 
     // Listen for BLE connection state changes
@@ -240,21 +261,26 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
 
   Future<void> _loadLocationOnce() async {
     try {
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.low,
-        ),
-      );
+      final location =
+          await widget.locationLoader?.call() ??
+          await (() async {
+            final pos = await Geolocator.getCurrentPosition(
+              locationSettings: const LocationSettings(
+                accuracy: LocationAccuracy.low,
+              ),
+            );
+            return (lat: pos.latitude, lon: pos.longitude);
+          })();
 
       if (!mounted) return;
 
       setState(() {
-        _latText = pos.latitude.toStringAsFixed(5);
-        _lonText = pos.longitude.toStringAsFixed(5);
+        _latText = location.lat.toStringAsFixed(5);
+        _lonText = location.lon.toStringAsFixed(5);
         _locErr = null;
       });
 
-      await _loadWeather(pos.latitude, pos.longitude);
+      await _loadWeather(location.lat, location.lon);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -291,13 +317,25 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     });
 
     try {
-      final svc = WeatherService(apiKey: openWeatherApiKey);
-      final w = await svc.fetchCurrent(lat: lat, lon: lon, units: 'imperial');
+      final weather =
+          await widget.weatherLoader?.call(lat, lon) ??
+          await (() async {
+            final svc = WeatherService(apiKey: openWeatherApiKey);
+            final w = await svc.fetchCurrent(
+              lat: lat,
+              lon: lon,
+              units: 'imperial',
+            );
+            return (
+              condition: w.condition,
+              tempText: '${w.temperature.round()}°F',
+            );
+          })();
 
       if (!mounted) return;
       setState(() {
-        _weatherCondition = w.condition;
-        _tempText = '${w.temperature.round()}°F';
+        _weatherCondition = weather.condition;
+        _tempText = weather.tempText;
         _weatherErr = null;
         _weatherLoading = false;
       });
@@ -312,7 +350,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
 
   @override
   Widget build(BuildContext context) {
-    final isDark = DriverSafetyApp.of(context).isDark;
+    final isDark = DriverSafetyApp.maybeOf(context)?.isDark ?? true;
     final bgTop = isDark ? const Color(0xFF0B1220) : const Color(0xFFCED8E4);
     final bgBottom = isDark ? const Color(0xFF0E1628) : const Color(0xFF7E97B9);
     final titleColor = isDark ? Colors.white : Colors.black;

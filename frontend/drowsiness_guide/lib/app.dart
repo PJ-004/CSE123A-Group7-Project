@@ -13,6 +13,8 @@ class DriverSafetyApp extends StatefulWidget {
 
   static _DriverSafetyAppState of(BuildContext context) =>
       context.findAncestorStateOfType<_DriverSafetyAppState>()!;
+  static _DriverSafetyAppState? maybeOf(BuildContext context) =>
+      context.findAncestorStateOfType<_DriverSafetyAppState>();
 
   @override
   State<DriverSafetyApp> createState() => _DriverSafetyAppState();
