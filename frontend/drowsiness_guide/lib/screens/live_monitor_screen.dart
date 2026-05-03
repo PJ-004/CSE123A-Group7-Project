@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import '../services/weather_service.dart';
 import '../services/ble_service.dart';
 import '../services/jetson_websocket_service.dart';
+import '../services/user_role_service.dart';
 import '../secrets.dart';
 import '../services/auth_service.dart';
 
@@ -18,24 +21,10 @@ const _border = Color(0x1A000000);
 // -----------------------------------------------------
 
 class LiveMonitorScreen extends StatefulWidget {
-  const LiveMonitorScreen({
-    super.key,
-    this.bleService,
-    this.jetsonWsService,
-    this.locationLoader,
-    this.weatherLoader,
-    this.jetsonWsUrl,
-  });
+  const LiveMonitorScreen({super.key, this.bleService, this.jetsonWsService});
 
   final BleService? bleService;
   final JetsonWebSocketService? jetsonWsService;
-  final Future<({double lat, double lon})> Function()? locationLoader;
-  final Future<({String condition, String tempText})> Function(
-    double lat,
-    double lon,
-  )?
-  weatherLoader;
-  final String? jetsonWsUrl;
 
   @override
   State<LiveMonitorScreen> createState() => _LiveMonitorScreenState();
@@ -43,13 +32,17 @@ class LiveMonitorScreen extends StatefulWidget {
 
 class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     with WidgetsBindingObserver {
-  static const String _defaultJetsonWsUrl = String.fromEnvironment(
+  static const String _jetsonWsUrl = String.fromEnvironment(
     'JETSON_WS_URL',
     defaultValue: 'ws://localhost:8080/ws/alerts?replay=0',
   );
-  late final String _jetsonWsUrl;
-  String? _latText;
-  String? _lonText;
+  static const int _fatigueRiskResetValue = 0;
+  static const int _fatigueRiskStep = 10;
+
+  String? _fleetName;
+  String? _displayName;
+
+  String? _cityText;
   String? _locErr;
 
   String? _weatherCondition;
@@ -59,13 +52,13 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   bool _weatherLoading = false;
 
   // ── BLE ──
-  late final BleService _ble;
-  String _bleState = 'Disconnected';
+  late BleService _ble;
+  String _bleState = kIsWeb ? 'Tap Bluetooth' : 'Disconnected';
   StreamSubscription? _bleStateSub;
   StreamSubscription? _bleAlertSub;
 
   // ── Jetson WebSocket ──
-  late final JetsonWebSocketService _jetsonWs;
+  late JetsonWebSocketService _jetsonWs;
   String _jetsonWsState = 'Disconnected';
   StreamSubscription? _jetsonWsStateSub;
   StreamSubscription? _jetsonWsAlertSub;
@@ -74,6 +67,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
 
   String _latestAlertLevel = 'None';
   String _jetsonDeviceState = 'Offline';
+  int _fatigueRisk = _fatigueRiskResetValue;
   DateTime? _jetsonLastSeen;
   final List<_DashboardAlert> _alerts = [];
   static const Duration _jetsonStaleAfter = Duration(seconds: 30);
@@ -82,16 +76,24 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   bool _wsIsBusy(String s) =>
       s.startsWith('Connecting…') || s.startsWith('Reconnecting…');
 
+  String get _fatigueRiskStatus {
+    if (_fatigueRisk >= 90) return 'Extreme fatigue';
+    if (_fatigueRisk >= 70) return 'Critical fatigue';
+    if (_fatigueRisk >= 50) return 'High fatigue';
+    if (_fatigueRisk >= 30) return 'Moderate fatigue';
+    if (_fatigueRisk >= 10) return 'Low fatigue';
+    return 'No fatigue';
+  }
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _jetsonWsUrl = widget.jetsonWsUrl ?? _defaultJetsonWsUrl;
     _ble = widget.bleService ?? BleService();
-    _jetsonWs =
-        widget.jetsonWsService ??
+    _jetsonWs = widget.jetsonWsService ??
         JetsonWebSocketService(uri: Uri.parse(_jetsonWsUrl));
+    WidgetsBinding.instance.addObserver(this);
     _loadLocationOnce();
+    _loadProfile();
 
     // Listen for BLE connection state changes
     _bleStateSub = _ble.connectionState.listen((state) {
@@ -108,6 +110,9 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
         source: 'BLE',
       );
     });
+    if (!kIsWeb) {
+      unawaited(_ble.scanAndConnect());
+    }
 
     // Listen for Jetson WebSocket status + alerts
     _jetsonWsStateSub = _jetsonWs.connectionState.listen((state) {
@@ -121,6 +126,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
         message: alert.message,
         source: 'Jetson WS',
         alertTimestamp: alert.timestamp,
+        fatigueRiskPercent: alert.fatigueRiskPercent,
       );
     });
     _jetsonPresenceSub = _jetsonWs.presence.listen(_handleJetsonPresence);
@@ -145,10 +151,19 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      final isConnected =
+      final wsConnected =
           _wsIsConnected(_jetsonWsState) || _wsIsBusy(_jetsonWsState);
-      if (!isConnected) {
+      if (!wsConnected) {
         _jetsonWs.connect();
+      }
+      // OS kills BLE in background on many Android devices — reconnect on resume.
+      if (!kIsWeb &&
+          _bleState != 'Connected' &&
+          _bleState != 'Scanning…' &&
+          _bleState != 'Connecting…' &&
+          _bleState != 'Select SleepyDrive…' &&
+          _bleState != 'Waiting for Bluetooth…') {
+        unawaited(_ble.scanAndConnect());
       }
     }
   }
@@ -159,10 +174,13 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     required String message,
     required String source,
     DateTime? alertTimestamp,
+    int? fatigueRiskPercent,
   }) {
     if (!mounted) return;
     setState(() {
       _latestAlertLevel = levelLabel;
+      final nextRisk = fatigueRiskPercent ?? _fatigueRisk + _fatigueRiskStep;
+      _fatigueRisk = nextRisk.clamp(0, 100).toInt();
       _alerts.insert(
         0,
         _DashboardAlert(
@@ -189,7 +207,13 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     if (!mounted) return;
     setState(() {
       _jetsonLastSeen = presence.timestamp;
-      _jetsonDeviceState = presence.online ? 'Online' : 'Offline';
+      final nextState = presence.online ? 'Online' : 'Offline';
+      if (_jetsonDeviceState != nextState && nextState == 'Offline') {
+        _fatigueRisk = _fatigueRiskResetValue;
+      } else if (presence.online && presence.fatigueRiskPercent != null) {
+        _fatigueRisk = presence.fatigueRiskPercent!.clamp(0, 100).toInt();
+      }
+      _jetsonDeviceState = nextState;
     });
   }
 
@@ -203,6 +227,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
           DateTime.now().difference(lastSeen) > _jetsonStaleAfter;
       if (stale && _jetsonDeviceState != 'Offline') {
         setState(() {
+          _fatigueRisk = _fatigueRiskResetValue;
           _jetsonDeviceState = 'Offline';
         });
       }
@@ -241,10 +266,11 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   void _onBluetoothTap() async {
     if (_bleState == 'Connected') {
       await _ble.disconnect();
-    } else if (_bleState == 'Disconnected' ||
-        _bleState == 'Not found' ||
-        _bleState == 'Connection failed') {
-      await _ble.scanAndConnect();
+    } else if (_bleState != 'Scanning…' &&
+        _bleState != 'Connecting…' &&
+        _bleState != 'Select SleepyDrive…' &&
+        _bleState != 'Waiting for Bluetooth…') {
+      await _ble.scanAndConnect(userInitiated: true);
     }
   }
 
@@ -260,32 +286,25 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
 
   Future<void> _loadLocationOnce() async {
     try {
-      final location =
-          await widget.locationLoader?.call() ??
-          await (() async {
-            final pos = await Geolocator.getCurrentPosition(
-              locationSettings: const LocationSettings(
-                accuracy: LocationAccuracy.low,
-              ),
-            );
-            return (lat: pos.latitude, lon: pos.longitude);
-          })();
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.low,
+        ),
+      );
 
       if (!mounted) return;
 
       setState(() {
-        _latText = location.lat.toStringAsFixed(5);
-        _lonText = location.lon.toStringAsFixed(5);
+        _cityText = null;
         _locErr = null;
       });
 
-      await _loadWeather(location.lat, location.lon);
+      await _loadWeather(pos.latitude, pos.longitude);
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _locErr = e.toString();
-        _latText = null;
-        _lonText = null;
+        _cityText = null;
         _weatherCondition = null;
         _tempText = null;
         _weatherErr = null;
@@ -293,16 +312,152 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
       });
     }
   }
+
+  Future<void> _loadProfile() async {
+    User? user;
+    try {
+      user = FirebaseAuth.instance.currentUser;
+    } catch (_) {
+      return;
+    }
+    if (user == null) return;
+    try {
+      final profile = await UserRoleService().fetchProfile(user.uid);
+      if (!mounted) return;
+      setState(() {
+        _fleetName = profile?.fleetName;
+        _displayName = profile?.displayName;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _showEditProfileDialog() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final current = _displayName ?? '';
+    final parts = current.split(' ');
+    final firstCtrl = TextEditingController(
+      text: parts.isNotEmpty ? parts.first : '',
+    );
+    final lastCtrl = TextEditingController(
+      text: parts.length > 1 ? parts.sublist(1).join(' ') : '',
+    );
+    String? errorText;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Edit profile'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: firstCtrl,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'First name'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: lastCtrl,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Last name'),
+              ),
+              if (errorText != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  errorText!,
+                  style: const TextStyle(color: Colors.red, fontSize: 13),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () async {
+                final first = firstCtrl.text.trim();
+                final last = lastCtrl.text.trim();
+                final fullName = [
+                  first,
+                  last,
+                ].where((s) => s.isNotEmpty).join(' ');
+                if (fullName.isEmpty) {
+                  setDialogState(
+                    () => errorText = 'Please enter at least a first name.',
+                  );
+                  return;
+                }
+                try {
+                  await UserRoleService().saveRole(
+                    uid: user.uid,
+                    role: 'driver',
+                    email: user.email,
+                    displayName: fullName,
+                  );
+                  if (!mounted) return;
+                  setState(() => _displayName = fullName);
+                  if (ctx.mounted) Navigator.pop(ctx);
+                } catch (e) {
+                  setDialogState(
+                    () => errorText = e.toString().replaceFirst(
+                      'Exception: ',
+                      '',
+                    ),
+                  );
+                }
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    firstCtrl.dispose();
+    lastCtrl.dispose();
+  }
+
+  Future<void> _showJoinFleetDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => _JoinFleetDialog(
+        onJoin: (code) async {
+          final user = FirebaseAuth.instance.currentUser;
+          if (user == null) return;
+          await UserRoleService().saveRole(
+            uid: user.uid,
+            role: 'driver',
+            fleetInviteCode: code,
+          );
+        },
+        onSuccess: () {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Fleet joined successfully')),
+          );
+          _loadProfile();
+        },
+        onError: (message) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(message)));
+        },
+      ),
+    );
+  }
+
   Future<void> _backToLogin() async {
     await AuthService().signOut();
 
     if (!mounted) return;
 
-    Navigator.pushNamedAndRemoveUntil(
-      context,
-      '/login',
-      (route) => false,
-    );
+    Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
   }
 
   Future<void> _loadWeather(double lat, double lon) async {
@@ -316,25 +471,14 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     });
 
     try {
-      final weather =
-          await widget.weatherLoader?.call(lat, lon) ??
-          await (() async {
-            final svc = WeatherService(apiKey: openWeatherApiKey);
-            final w = await svc.fetchCurrent(
-              lat: lat,
-              lon: lon,
-              units: 'imperial',
-            );
-            return (
-              condition: w.condition,
-              tempText: '${w.temperature.round()}°F',
-            );
-          })();
+      final svc = WeatherService(apiKey: openWeatherApiKey);
+      final w = await svc.fetchCurrent(lat: lat, lon: lon, units: 'imperial');
 
       if (!mounted) return;
       setState(() {
-        _weatherCondition = weather.condition;
-        _tempText = weather.tempText;
+        _cityText = w.city;
+        _weatherCondition = w.condition;
+        _tempText = '${w.temperature.round()}°F';
         _weatherErr = null;
         _weatherLoading = false;
       });
@@ -349,19 +493,10 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
 
   @override
   Widget build(BuildContext context) {
-<<<<<<< HEAD
-    final isDark = DriverSafetyApp.maybeOf(context)?.isDark ?? true;
-=======
-    final isDark = Theme.of(context).brightness == Brightness.dark;
->>>>>>> 95aeab0 (test cases for Maps screen)
-    final bgTop = isDark ? const Color(0xFF0B1220) : const Color(0xFFCED8E4);
-    final bgBottom = isDark ? const Color(0xFF0E1628) : const Color(0xFF7E97B9);
-    final titleColor = isDark ? Colors.white : Colors.black;
-    final iconColor = isDark ? Colors.white : Colors.black;
-    const driverId = "Sluggish Driver";
-    const vehicle = "SlugMobile";
-    const fatigueRisk = 42;
-    const status = "Normal";
+    const bgTop = Color(0xFFCED8E4);
+    const bgBottom = Color(0xFF7E97B9);
+    const titleColor = Colors.black;
+    const iconColor = Colors.black;
 
     return Scaffold(
       backgroundColor: bgTop,
@@ -380,6 +515,11 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
         ),
         actions: [
           IconButton(
+            onPressed: _showEditProfileDialog,
+            tooltip: 'Edit profile',
+            icon: Icon(Icons.account_circle, color: iconColor),
+          ),
+          IconButton(
             onPressed: _onBluetoothTap,
             tooltip: _bleState == 'Connected'
                 ? 'Disconnect BLE'
@@ -387,7 +527,9 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
             icon: Icon(
               _bleState == 'Connected'
                   ? Icons.bluetooth_connected
-                  : _bleState == 'Scanning…' || _bleState == 'Connecting…'
+                  : _bleState == 'Scanning…' ||
+                        _bleState == 'Connecting…' ||
+                        _bleState == 'Select SleepyDrive…'
                   ? Icons.bluetooth_searching
                   : Icons.bluetooth,
               color: _bleState == 'Connected' ? _accentBlue : iconColor,
@@ -404,14 +546,17 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
                   : _wsIsBusy(_jetsonWsState)
                   ? Icons.sync
                   : Icons.wifi_tethering_off,
-              color: _wsIsConnected(_jetsonWsState)
-                  ? _accentBlue
-                  : iconColor,
+              color: _wsIsConnected(_jetsonWsState) ? _accentBlue : iconColor,
             ),
           ),
           IconButton(
+            onPressed: _showJoinFleetDialog,
+            tooltip: 'Join a fleet',
+            icon: Icon(Icons.group_add, color: iconColor),
+          ),
+          IconButton(
             onPressed: _loadLocationOnce,
-            icon:  Icon(Icons.my_location, color: iconColor),
+            icon: Icon(Icons.my_location, color: iconColor),
           ),
           IconButton(
             onPressed: _backToLogin,
@@ -432,9 +577,13 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
           padding: const EdgeInsets.all(16),
           child: ListView(
             children: [
-              _HeaderCard(driverId: driverId, vehicle: vehicle),
+              _HeaderCard(
+                displayName: _displayName,
+                fleetName: _fleetName,
+                isOnline: _jetsonDeviceState == 'Online',
+              ),
               const SizedBox(height: 12),
-              _RiskCard(value: fatigueRisk, label: status),
+              _RiskCard(value: _fatigueRisk, label: _fatigueRiskStatus),
               const SizedBox(height: 12),
               Wrap(
                 spacing: 10,
@@ -446,19 +595,11 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
                     label: "Jetson Device",
                     value: _jetsonDeviceState,
                   ),
-                  const _StatusChip(label: "Face", value: "Detected"),
-                  const _StatusChip(label: "Eyes", value: "Open"),
                   _StatusChip(label: "Alert", value: _latestAlertLevel),
                   _StatusChip(
-                    label: "Lat",
+                    label: "City",
                     value:
-                        _latText ??
-                        (_locErr == null ? "Loading…" : "Unavailable"),
-                  ),
-                  _StatusChip(
-                    label: "Lon",
-                    value:
-                        _lonText ??
+                        _cityText ??
                         (_locErr == null ? "Loading…" : "Unavailable"),
                   ),
                   _StatusChip(
@@ -505,10 +646,8 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
                 borderRadius: BorderRadius.circular(16),
               ),
               child: InkWell(
-                key: const ValueKey('drowsinessDetectedBar'),
                 borderRadius: BorderRadius.circular(16),
-                onTap: () =>
-                    Navigator.pushNamed(context, '/map'),
+                onTap: () => Navigator.pushNamed(context, '/map'),
                 child: const Center(
                   child: Text(
                     'DROWSINESS DETECTED',
@@ -531,10 +670,11 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
 // -------------------- Components --------------------
 
 class _HeaderCard extends StatelessWidget {
-  final String driverId;
-  final String vehicle;
+  final String? displayName;
+  final String? fleetName;
+  final bool isOnline;
 
-  const _HeaderCard({required this.driverId, required this.vehicle});
+  const _HeaderCard({this.displayName, this.fleetName, required this.isOnline});
 
   @override
   Widget build(BuildContext context) {
@@ -549,8 +689,6 @@ class _HeaderCard extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         child: Row(
           children: [
-            const Icon(Icons.shield, color: _accentBlue),
-            const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -566,29 +704,47 @@ class _HeaderCard extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    driverId,
+                    displayName ?? '—',
                     style: const TextStyle(
                       color: Colors.black,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  Text(vehicle, style: TextStyle(color: _black(0.6))),
+                  if (fleetName != null) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.local_shipping_rounded,
+                          size: 13,
+                          color: _black(0.45),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          fleetName!,
+                          style: TextStyle(color: _black(0.55), fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
-                color: _accentBlue.withValues(alpha: 0.12),
+                color: isOnline
+                    ? const Color(0xFF10B981)
+                    : const Color(0xFFEF4444),
                 borderRadius: BorderRadius.circular(999),
               ),
-              child: const Text(
-                "LIVE",
-                style: TextStyle(
-                  color: _accentBlue,
+              child: Text(
+                isOnline ? 'Online' : 'Offline',
+                style: const TextStyle(
+                  color: Colors.white,
                   fontWeight: FontWeight.w700,
-                  letterSpacing: 1,
+                  letterSpacing: 0.5,
+                  fontSize: 13,
                 ),
               ),
             ),
@@ -682,7 +838,6 @@ class _StatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      constraints: const BoxConstraints(maxWidth: 320),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: _surface,
@@ -690,6 +845,7 @@ class _StatusChip extends StatelessWidget {
         border: Border.all(color: _border), // <-- not const (works across SDKs)
       ),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
           Container(
             width: 8,
@@ -700,26 +856,10 @@ class _StatusChip extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          Expanded(
-            child: Text.rich(
-              TextSpan(
-                children: [
-                  TextSpan(
-                    text: '$label: ',
-                    style: TextStyle(color: _black(0.55)),
-                  ),
-                  TextSpan(
-                    text: value,
-                    style: TextStyle(
-                      color: _black(0.8),
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
+          Text("$label: ", style: TextStyle(color: _black(0.55))),
+          Text(
+            value,
+            style: TextStyle(color: _black(0.8), fontWeight: FontWeight.w700),
           ),
         ],
       ),
@@ -879,6 +1019,99 @@ class _AlertsCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _JoinFleetDialog extends StatefulWidget {
+  final Future<void> Function(String code) onJoin;
+  final VoidCallback onSuccess;
+  final void Function(String message) onError;
+
+  const _JoinFleetDialog({
+    required this.onJoin,
+    required this.onSuccess,
+    required this.onError,
+  });
+
+  @override
+  State<_JoinFleetDialog> createState() => _JoinFleetDialogState();
+}
+
+class _JoinFleetDialogState extends State<_JoinFleetDialog> {
+  final _ctrl = TextEditingController();
+  String? _error;
+  bool _loading = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final code = _ctrl.text.trim();
+    if (code.isEmpty) {
+      setState(() => _error = 'Enter an invite code');
+      return;
+    }
+    setState(() {
+      _error = null;
+      _loading = true;
+    });
+    try {
+      await widget.onJoin(code);
+      if (!mounted) return;
+      Navigator.pop(context);
+      widget.onSuccess();
+    } on UserRoleServiceException catch (e) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      widget.onError(e.message);
+    } catch (_) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      widget.onError('Could not join fleet. Try again.');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Join a Fleet'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('Enter the invite code from your fleet operator.'),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _ctrl,
+            textCapitalization: TextCapitalization.characters,
+            decoration: InputDecoration(
+              hintText: 'Invite code',
+              errorText: _error,
+              border: const OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _loading ? null : _submit(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _loading ? null : () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _loading ? null : _submit,
+          child: _loading
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('Join'),
+        ),
+      ],
     );
   }
 }
