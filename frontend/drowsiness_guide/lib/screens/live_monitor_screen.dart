@@ -646,6 +646,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
                 borderRadius: BorderRadius.circular(16),
               ),
               child: InkWell(
+                key: const ValueKey('drowsinessDetectedBar'),
                 borderRadius: BorderRadius.circular(16),
                 onTap: () => Navigator.pushNamed(context, '/map'),
                 child: const Center(

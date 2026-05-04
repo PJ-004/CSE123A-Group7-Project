@@ -23,7 +23,9 @@ void main() {
     OSMPlacesService.clearCachesForTesting();
   });
 
-  testWidgets('N1 DROWSINESS DETECTED opens Map route', (tester) async {
+  testWidgets(
+    'N1 DROWSINESS DETECTED opens Map route',
+    (tester) async {
     tester.view.physicalSize = const Size(1200, 2000);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -46,9 +48,10 @@ void main() {
       // Drain LiveMonitor Jetson WebSocket `ready.timeout(8s)` pending timers.
       await tester.pump(const Duration(seconds: 10));
     }, () => createMapTestHttpClient(MapHttpStubOptions()));
-  });
 
-  testWidgets('N2 back from Map returns to live monitor', (tester) async {
+  testWidgets(
+    'N2 back from Map returns to live monitor',
+    (tester) async {
     tester.view.physicalSize = const Size(1200, 2000);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);

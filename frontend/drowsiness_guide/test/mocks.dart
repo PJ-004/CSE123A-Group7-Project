@@ -89,6 +89,28 @@ class MockUserRoleService extends Mock implements UserRoleService {
       ) as Future<String?>;
 
   @override
+  Future<void> saveRole({
+    required String uid,
+    required String role,
+    String? email,
+    String? displayName,
+    String? fleetName,
+    String? fleetInviteCode,
+  }) =>
+      super.noSuchMethod(
+        Invocation.method(#saveRole, const [], {
+          #uid: uid,
+          #role: role,
+          #email: email,
+          #displayName: displayName,
+          #fleetName: fleetName,
+          #fleetInviteCode: fleetInviteCode,
+        }),
+        returnValue: Future<void>.value(),
+        returnValueForMissingStub: Future<void>.value(),
+      ) as Future<void>;
+
+  @override
   Future<UserProfile?> fetchProfile(String uid) => super.noSuchMethod(
         Invocation.method(#fetchProfile, [uid]),
         returnValue: Future<UserProfile?>.value(null),

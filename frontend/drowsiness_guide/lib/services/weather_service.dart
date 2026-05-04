@@ -32,15 +32,21 @@ class WeatherService {
     final main = data['main'] as Map<String, dynamic>;
 
     return WeatherResult(
-      condition: (weather0['main'] ?? 'Unknown') as String, 
+      city: (data['name'] ?? 'Current location').toString(),
+      condition: (weather0['main'] ?? 'Unknown') as String,
       temperature: (main['temp'] as num).toDouble(),
     );
   }
 }
 
 class WeatherResult {
+  final String city;
   final String condition;
   final double temperature;
 
-  const WeatherResult({required this.condition, required this.temperature});
+  const WeatherResult({
+    required this.city,
+    required this.condition,
+    required this.temperature,
+  });
 }

@@ -8,12 +8,14 @@ class JetsonAlert {
   final int level;
   final String message;
   final DateTime timestamp;
+  final int? fatigueRiskPercent;
 
   JetsonAlert({
     required this.deviceId,
     required this.level,
     required this.message,
     DateTime? timestamp,
+    this.fatigueRiskPercent,
   }) : timestamp = timestamp ?? DateTime.now();
 
   String get levelLabel {
@@ -34,11 +36,13 @@ class JetsonPresence {
   final String sourceId;
   final bool online;
   final DateTime timestamp;
+  final int? fatigueRiskPercent;
 
   JetsonPresence({
     required this.sourceId,
     required this.online,
     DateTime? timestamp,
+    this.fatigueRiskPercent,
   }) : timestamp = timestamp ?? DateTime.now();
 }
 
@@ -191,12 +195,19 @@ class JetsonWebSocketService {
                 payload['timestamp'] ??
                 payload['ts'],
           );
+          final fatigueRiskPercent = _parseOptionalInt(
+            payload['fatigueRiskPercent'] ??
+                payload['fatigue_risk_percent'] ??
+                payload['fatigueRisk'] ??
+                payload['fatigue_risk'],
+          );
 
           return JetsonAlert(
             deviceId: deviceId,
             level: level,
             message: msg,
             timestamp: ts,
+            fatigueRiskPercent: fatigueRiskPercent,
           );
         }
       } catch (_) {
@@ -256,7 +267,18 @@ class JetsonWebSocketService {
       final sourceId = (payload['source_id'] ?? payload['device_id'] ?? 'jetson').toString();
       final online = _parseOnline(payload['online'] ?? payload['status'], defaultValue: type == 'heartbeat');
       final ts = _parseTimestamp(payload['event_ts'] ?? payload['timestamp'] ?? payload['ts']);
-      return JetsonPresence(sourceId: sourceId, online: online, timestamp: ts);
+      final fatigueRiskPercent = _parseOptionalInt(
+        payload['fatigueRiskPercent'] ??
+            payload['fatigue_risk_percent'] ??
+            payload['fatigueRisk'] ??
+            payload['fatigue_risk'],
+      );
+      return JetsonPresence(
+        sourceId: sourceId,
+        online: online,
+        timestamp: ts,
+        fatigueRiskPercent: fatigueRiskPercent,
+      );
     } catch (_) {
       return null;
     }
@@ -314,6 +336,13 @@ class JetsonWebSocketService {
       default:
         return 1;
     }
+  }
+
+  int? _parseOptionalInt(dynamic raw) {
+    if (raw == null) return null;
+    if (raw is int) return raw;
+    if (raw is double) return raw.round();
+    return int.tryParse(raw.toString().trim());
   }
 
   bool _parseOnline(dynamic raw, {bool defaultValue = true}) {

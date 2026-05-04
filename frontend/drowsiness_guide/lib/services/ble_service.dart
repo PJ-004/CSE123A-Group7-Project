@@ -51,7 +51,7 @@ class BleService {
   }
 
   /// Scan for the SleepyDrive device and connect.
-  Future<void> scanAndConnect() async {
+  Future<void> scanAndConnect({bool userInitiated = false}) async {
     // Wait for Bluetooth adapter to be on (gives iOS time to process permission)
     _setState('Waiting for Bluetooth…');
     try {

@@ -8,11 +8,17 @@ import 'package:drowsiness_guide/services/user_role_service.dart';
 class RoleSelectionScreen extends StatefulWidget {
   final String? email;
   final String? password;
+  final AuthService? authService;
+  final UserRoleService? userRoleService;
+  final User? Function()? currentUserResolver;
 
   const RoleSelectionScreen({
     super.key,
     required this.email,
     required this.password,
+    this.authService,
+    this.userRoleService,
+    this.currentUserResolver,
   });
 
   @override
@@ -20,14 +26,24 @@ class RoleSelectionScreen extends StatefulWidget {
 }
 
 class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
-  final AuthService _authService = AuthService();
-  final UserRoleService _userRoleService = UserRoleService();
+  late final AuthService _authService;
+  late final UserRoleService _userRoleService;
+  late final User? Function() _currentUserResolver;
 
   bool _isLoading = false;
   String? _errorText;
 
+  @override
+  void initState() {
+    super.initState();
+    _authService = widget.authService ?? AuthService();
+    _userRoleService = widget.userRoleService ?? UserRoleService();
+    _currentUserResolver = widget.currentUserResolver ??
+        (() => FirebaseAuth.instance.currentUser);
+  }
+
   Future<User> _ensureAuthenticatedUser() async {
-    final existingUser = FirebaseAuth.instance.currentUser;
+    final existingUser = _currentUserResolver();
     if (existingUser != null) {
       return existingUser;
     }
@@ -118,7 +134,7 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
   }
 
   Future<void> _handleBack() async {
-    if (FirebaseAuth.instance.currentUser != null) {
+    if (_currentUserResolver() != null) {
       await _authService.signOut();
     }
     if (!mounted) return;
@@ -139,7 +155,7 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = DriverSafetyApp.of(context).isDark;
+    final isDark = DriverSafetyApp.maybeOf(context)?.isDark ?? false;
     final bgTop = isDark ? const Color(0xFF0D1117) : const Color(0xFFCED8E4);
     final bgBottom = isDark ? const Color(0xFF1A2332) : const Color(0xFF7E97B9);
 
@@ -192,7 +208,7 @@ class _RoleSelectionScreenState extends State<RoleSelectionScreen> {
                     ),
                     const SizedBox(height: 18),
                     Text(
-                      FirebaseAuth.instance.currentUser == null
+                      _currentUserResolver() == null
                           ? "Select how you'll use the platform"
                           : "Finish setting up your account",
                       textAlign: TextAlign.center,

@@ -14,6 +14,22 @@ class UserRoleServiceException implements Exception {
   String toString() => message;
 }
 
+class UserProfile {
+  final String uid;
+  final String role;
+  final String? email;
+  final String? displayName;
+  final String? fleetName;
+
+  const UserProfile({
+    required this.uid,
+    required this.role,
+    this.email,
+    this.displayName,
+    this.fleetName,
+  });
+}
+
 class UserRoleService {
   static const String _backendBaseUrl = String.fromEnvironment(
     'BACKEND_BASE_URL',
@@ -56,17 +72,68 @@ class UserRoleService {
     return role;
   }
 
+  Future<UserProfile?> fetchProfile(String uid) async {
+    final http.Response response;
+    try {
+      response = await http
+          .get(Uri.parse('$backendBaseUrl/users/$uid'))
+          .timeout(_timeout);
+    } on Exception {
+      throw const UserRoleServiceException(
+        'Could not reach the profile server. Check your connection.',
+      );
+    }
+
+    if (response.statusCode == 404) {
+      return null;
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw UserRoleServiceException(
+        'Failed to fetch user profile',
+        statusCode: response.statusCode,
+      );
+    }
+
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    final role = decoded['role'];
+    if (role is! String || role.isEmpty) {
+      throw const UserRoleServiceException('User profile response was invalid');
+    }
+
+    return UserProfile(
+      uid: (decoded['uid'] ?? uid).toString(),
+      role: role,
+      email: decoded['email']?.toString(),
+      displayName: decoded['displayName']?.toString(),
+      fleetName: decoded['fleetName']?.toString(),
+    );
+  }
+
   Future<void> saveRole({
     required String uid,
     required String role,
+    String? email,
+    String? displayName,
+    String? fleetName,
+    String? fleetInviteCode,
   }) async {
+    final payload = <String, dynamic>{
+      'uid': uid,
+      'role': role,
+      if (email != null) 'email': email,
+      if (displayName != null) 'displayName': displayName,
+      if (fleetName != null) 'fleetName': fleetName,
+      if (fleetInviteCode != null) 'fleetInviteCode': fleetInviteCode,
+    };
+
     final http.Response response;
     try {
       response = await http
           .post(
             Uri.parse('$backendBaseUrl/users'),
             headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'uid': uid, 'role': role}),
+            body: jsonEncode(payload),
           )
           .timeout(_timeout);
     } on Exception {
