@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 class JetsonAlert {
@@ -8,15 +9,22 @@ class JetsonAlert {
   final int level;
   final String message;
   final DateTime timestamp;
+  final Map<String, dynamic> metadata;
   final int? fatigueRiskPercent;
+  final double? fatigueEventDurationSeconds;
+  final bool? recovered;
 
   JetsonAlert({
     required this.deviceId,
     required this.level,
     required this.message,
     DateTime? timestamp,
+    Map<String, dynamic>? metadata,
     this.fatigueRiskPercent,
-  }) : timestamp = timestamp ?? DateTime.now();
+    this.fatigueEventDurationSeconds,
+    this.recovered,
+  }) : timestamp = timestamp ?? DateTime.now(),
+       metadata = metadata ?? const <String, dynamic>{};
 
   String get levelLabel {
     switch (level) {
@@ -36,22 +44,25 @@ class JetsonPresence {
   final String sourceId;
   final bool online;
   final DateTime timestamp;
+  final Map<String, dynamic> metadata;
   final int? fatigueRiskPercent;
 
   JetsonPresence({
     required this.sourceId,
     required this.online,
     DateTime? timestamp,
+    Map<String, dynamic>? metadata,
     this.fatigueRiskPercent,
-  }) : timestamp = timestamp ?? DateTime.now();
+  }) : timestamp = timestamp ?? DateTime.now(),
+       metadata = metadata ?? const <String, dynamic>{};
 }
 
 class JetsonWebSocketService {
   JetsonWebSocketService({
     required Uri uri,
     Duration reconnectDelay = const Duration(seconds: 3),
-  })  : _uri = uri,
-        _reconnectDelay = reconnectDelay;
+  }) : _uri = uri,
+       _reconnectDelay = reconnectDelay;
 
   final Uri _uri;
   final Duration _reconnectDelay;
@@ -104,9 +115,8 @@ class JetsonWebSocketService {
 
       _socketSub = channel.stream.listen(
         _onMessage,
-        onError: (error) => _handleSocketClosed(
-          'Connection error: ${_compactError(error)}',
-        ),
+        onError: (error) =>
+            _handleSocketClosed('Connection error: ${_compactError(error)}'),
         onDone: () => _handleSocketClosed('Disconnected'),
         cancelOnError: false,
       );
@@ -176,7 +186,9 @@ class JetsonWebSocketService {
           final payload = _extractAlertPayload(decoded);
           if (payload == null) return null;
 
-          final deviceId = payload['device_id']?.toString() ?? 'unknown';
+          final deviceId =
+              (payload['device_id'] ?? payload['source_id'] ?? 'unknown')
+                  .toString();
 
           final level = _parseLevel(
             payload['level'] ?? payload['severity'] ?? payload['risk'],
@@ -195,19 +207,21 @@ class JetsonWebSocketService {
                 payload['timestamp'] ??
                 payload['ts'],
           );
-          final fatigueRiskPercent = _parseOptionalInt(
-            payload['fatigueRiskPercent'] ??
-                payload['fatigue_risk_percent'] ??
-                payload['fatigueRisk'] ??
-                payload['fatigue_risk'],
-          );
+          final metadata = _metadataFromPayload(payload);
 
           return JetsonAlert(
             deviceId: deviceId,
             level: level,
             message: msg,
             timestamp: ts,
-            fatigueRiskPercent: fatigueRiskPercent,
+            metadata: metadata,
+            fatigueRiskPercent: _parseFatigueRisk(payload, metadata),
+            fatigueEventDurationSeconds: _parseFatigueEventDuration(
+              payload,
+              metadata,
+              msg,
+            ),
+            recovered: _parseRecoveryState(payload, metadata, msg, level),
           );
         }
       } catch (_) {
@@ -225,6 +239,12 @@ class JetsonWebSocketService {
         level: level,
         message: msg.isEmpty ? 'Alert' : msg,
         timestamp: DateTime.now(),
+        recovered: _parseRecoveryState(
+          const <String, dynamic>{},
+          const <String, dynamic>{},
+          msg,
+          level,
+        ),
       );
     }
 
@@ -233,6 +253,12 @@ class JetsonWebSocketService {
       level: 1,
       message: text,
       timestamp: DateTime.now(),
+      recovered: _parseRecoveryState(
+        const <String, dynamic>{},
+        const <String, dynamic>{},
+        text,
+        1,
+      ),
     );
   }
 
@@ -247,7 +273,9 @@ class JetsonWebSocketService {
     } else {
       text = raw.toString().trim();
     }
-    if (text.isEmpty || !(text.startsWith('{') && text.endsWith('}'))) return null;
+    if (text.isEmpty || !(text.startsWith('{') && text.endsWith('}'))) {
+      return null;
+    }
 
     try {
       final decoded = _asStringDynamicMap(jsonDecode(text));
@@ -257,27 +285,31 @@ class JetsonWebSocketService {
       Map<String, dynamic>? payload;
       if (type == 'jetson_presence') {
         payload = _asStringDynamicMap(decoded['data']);
-      } else if (type == 'presence' || type == 'status' || type == 'heartbeat') {
+      } else if (type == 'presence' ||
+          type == 'status' ||
+          type == 'heartbeat') {
         payload = decoded;
       } else {
         return null;
       }
       if (payload == null) return null;
 
-      final sourceId = (payload['source_id'] ?? payload['device_id'] ?? 'jetson').toString();
-      final online = _parseOnline(payload['online'] ?? payload['status'], defaultValue: type == 'heartbeat');
-      final ts = _parseTimestamp(payload['event_ts'] ?? payload['timestamp'] ?? payload['ts']);
-      final fatigueRiskPercent = _parseOptionalInt(
-        payload['fatigueRiskPercent'] ??
-            payload['fatigue_risk_percent'] ??
-            payload['fatigueRisk'] ??
-            payload['fatigue_risk'],
+      final sourceId =
+          (payload['source_id'] ?? payload['device_id'] ?? 'jetson').toString();
+      final online = _parseOnline(
+        payload['online'] ?? payload['status'],
+        defaultValue: type == 'heartbeat',
       );
+      final ts = _parseTimestamp(
+        payload['event_ts'] ?? payload['timestamp'] ?? payload['ts'],
+      );
+      final metadata = _metadataFromPayload(payload);
       return JetsonPresence(
         sourceId: sourceId,
         online: online,
         timestamp: ts,
-        fatigueRiskPercent: fatigueRiskPercent,
+        metadata: metadata,
+        fatigueRiskPercent: _parseFatigueRisk(payload, metadata),
       );
     } catch (_) {
       return null;
@@ -312,6 +344,121 @@ class JetsonWebSocketService {
     return obj;
   }
 
+  Map<String, dynamic> _metadataFromPayload(Map<String, dynamic> payload) {
+    final raw = payload['metadata'];
+    final metadata = raw is Map<String, dynamic>
+        ? Map<String, dynamic>.from(raw)
+        : raw is Map
+        ? Map<String, dynamic>.from(raw)
+        : <String, dynamic>{};
+
+    for (final key in const [
+      'fatigue_risk_percent',
+      'fatigue_risk',
+      'fatigueRiskPercent',
+      'fatigueRisk',
+      'risk_percent',
+      'riskPercent',
+      'risk',
+      'fatigue_score',
+      'fatigueScore',
+      'score',
+      'event_count',
+      'continuous_duration_sec',
+      'event_duration_sec',
+      'fatigue_duration_sec',
+      'duration_sec',
+      'closed_duration_sec',
+      'eyes_closed_duration_sec',
+      'deviated_duration_sec',
+      'head_inattention_duration_sec',
+      'out_of_frame_duration_sec',
+      'no_face_duration_sec',
+      'absent_duration_sec',
+      'ear',
+      'blink_ms',
+    ]) {
+      if (payload.containsKey(key) && !metadata.containsKey(key)) {
+        metadata[key] = payload[key];
+      }
+    }
+
+    return metadata;
+  }
+
+  int? _parseFatigueRisk(
+    Map<String, dynamic> payload,
+    Map<String, dynamic> metadata,
+  ) {
+    for (final key in const [
+      'fatigue_risk_percent',
+      'fatigue_risk',
+      'fatigueRiskPercent',
+      'fatigueRisk',
+      'risk_percent',
+      'riskPercent',
+      'fatigue_score',
+      'fatigueScore',
+      'score',
+    ]) {
+      final value = _parsePercent(payload[key] ?? metadata[key]);
+      if (value != null) return value;
+    }
+
+    final risk = _parsePercent(payload['risk'] ?? metadata['risk']);
+    if (risk != null && risk > 2) return risk;
+    return null;
+  }
+
+  double? _parseFatigueEventDuration(
+    Map<String, dynamic> payload,
+    Map<String, dynamic> metadata,
+    String message,
+  ) {
+    for (final key in const [
+      'continuous_duration_sec',
+      'event_duration_sec',
+      'fatigue_duration_sec',
+      'duration_sec',
+      'closed_duration_sec',
+      'eyes_closed_duration_sec',
+      'deviated_duration_sec',
+      'head_inattention_duration_sec',
+      'out_of_frame_duration_sec',
+      'no_face_duration_sec',
+      'absent_duration_sec',
+    ]) {
+      final value = _parseSeconds(payload[key] ?? metadata[key]);
+      if (value != null) return value;
+    }
+
+    final blinkMs = _parseSeconds(payload['blink_ms'] ?? metadata['blink_ms']);
+    if (blinkMs != null) return blinkMs / 1000.0;
+
+    final match = RegExp(
+      r'(eyes closed|deviated|out of frame|no face)[^\d]*(\d+(?:\.\d+)?)\s*s',
+      caseSensitive: false,
+    ).firstMatch(message);
+    if (match == null) return null;
+    return double.tryParse(match.group(2) ?? '');
+  }
+
+  double? _parseSeconds(dynamic raw) {
+    if (raw == null || raw is bool) return null;
+    final text = raw.toString().trim().toLowerCase();
+    if (text.isEmpty) return null;
+    final parsed = num.tryParse(
+      text
+          .replaceAll('seconds', '')
+          .replaceAll('second', '')
+          .replaceAll('sec', '')
+          .replaceAll('s', '')
+          .trim(),
+    );
+    if (parsed == null || parsed.isNaN) return null;
+    return parsed.toDouble().clamp(0, double.infinity).toDouble();
+  }
+
   int _parseLevel(dynamic raw) {
     if (raw == null) return 1;
     if (raw is int) return raw;
@@ -338,11 +485,106 @@ class JetsonWebSocketService {
     }
   }
 
-  int? _parseOptionalInt(dynamic raw) {
+  bool? _parseRecoveryState(
+    Map<String, dynamic> payload,
+    Map<String, dynamic> metadata,
+    String message,
+    int level,
+  ) {
+    const keys = [
+      'recovered',
+      'is_recovered',
+      'has_recovered',
+      'recovery',
+      'recovery_state',
+      'resolved',
+      'is_resolved',
+      'alert_active',
+      'active',
+      'in_alert_state',
+      'alert_state',
+      'state',
+      'event',
+      'event_type',
+      'status',
+    ];
+
+    for (final key in keys) {
+      final state = _parseRecoveryToken(payload[key] ?? metadata[key]);
+      if (state != null) return state;
+    }
+
+    final messageState = _parseRecoveryToken(message);
+    if (messageState != null) return messageState;
+
+    if (level <= 0) return true;
+    return null;
+  }
+
+  bool? _parseRecoveryToken(dynamic raw) {
     if (raw == null) return null;
-    if (raw is int) return raw;
-    if (raw is double) return raw.round();
-    return int.tryParse(raw.toString().trim());
+    if (raw is bool) return raw;
+
+    final text = raw.toString().trim().toLowerCase();
+    if (text.isEmpty) return null;
+
+    if (text == '1' ||
+        text == 'true' ||
+        text == 'yes' ||
+        text == 'recovered' ||
+        text == 'recovery' ||
+        text == 'resolved' ||
+        text == 'cleared' ||
+        text == 'clear' ||
+        text == 'normal' ||
+        text == 'safe' ||
+        text == 'inactive' ||
+        text == 'ended') {
+      return true;
+    }
+
+    if (text == '0' ||
+        text == 'false' ||
+        text == 'no' ||
+        text == 'active' ||
+        text == 'alert' ||
+        text == 'triggered' ||
+        text == 'unrecovered' ||
+        text == 'ongoing') {
+      return false;
+    }
+
+    if (text.contains('recover')) return true;
+    if (text.contains('resolved') ||
+        text.contains('clear') ||
+        text.contains('back to normal') ||
+        text.contains('attentive again')) {
+      return true;
+    }
+
+    if (text.contains('eyes closed') ||
+        text.contains('out of frame') ||
+        text.contains('inattentive') ||
+        text.contains('drows') ||
+        text.contains('fatigue') ||
+        text.contains('head down') ||
+        text.contains('no face')) {
+      return false;
+    }
+
+    return null;
+  }
+
+  int? _parsePercent(dynamic raw) {
+    if (raw == null || raw is bool) return null;
+    final text = raw.toString().trim().replaceAll('%', '');
+    if (text.isEmpty) return null;
+    final parsed = num.tryParse(text);
+    if (parsed == null) return null;
+    var value = parsed.toDouble();
+    if (value < 0) value = 0;
+    if (value > 0 && value <= 1) value *= 100;
+    return value.round().clamp(0, 100).toInt();
   }
 
   bool _parseOnline(dynamic raw, {bool defaultValue = true}) {
@@ -350,9 +592,15 @@ class JetsonWebSocketService {
     if (raw == null) return defaultValue;
     final text = raw.toString().trim().toLowerCase();
     if (text == 'online' || text == 'up' || text == 'connected') return true;
-    if (text == 'offline' || text == 'down' || text == 'disconnected') return false;
-    if (text == 'true' || text == '1' || text == 'yes' || text == 'on') return true;
-    if (text == 'false' || text == '0' || text == 'no' || text == 'off') return false;
+    if (text == 'offline' || text == 'down' || text == 'disconnected') {
+      return false;
+    }
+    if (text == 'true' || text == '1' || text == 'yes' || text == 'on') {
+      return true;
+    }
+    if (text == 'false' || text == '0' || text == 'no' || text == 'off') {
+      return false;
+    }
     return defaultValue;
   }
 
@@ -364,7 +612,9 @@ class JetsonWebSocketService {
 
   DateTime _parseTimestamp(dynamic raw) {
     if (raw is DateTime) return raw;
-    if (raw is int) return DateTime.fromMillisecondsSinceEpoch(raw, isUtc: true).toLocal();
+    if (raw is int) {
+      return DateTime.fromMillisecondsSinceEpoch(raw, isUtc: true).toLocal();
+    }
     if (raw is double) {
       final ms = (raw * 1000).round();
       return DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true).toLocal();
@@ -408,4 +658,7 @@ class JetsonWebSocketService {
     _presenceCtrl.close();
     _stateCtrl.close();
   }
+
+  @visibleForTesting
+  void processMessageForTesting(dynamic raw) => _onMessage(raw);
 }

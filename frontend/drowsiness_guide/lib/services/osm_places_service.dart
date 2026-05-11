@@ -1,10 +1,21 @@
 import 'dart:convert';
 import 'dart:math';
-
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 class OSMPlacesService {
+  final http.Client _client;
+
+  OSMPlacesService({http.Client? httpClient})
+      : _client = httpClient ?? http.Client();
+
+  @visibleForTesting
+  static void clearCacheForTesting() {
+    _cache.clear();
+    _lastAttemptAt.clear();
+    _inFlight.clear();
+  }
+
   static const List<String> _endpoints = <String>[
     'https://overpass-api.de/api/interpreter',
     'https://overpass.kumi.systems/api/interpreter',
@@ -16,14 +27,6 @@ class OSMPlacesService {
   static final Map<String, DateTime> _lastAttemptAt = <String, DateTime>{};
   static final Map<String, Future<List<PlaceSummary>>> _inFlight =
       <String, Future<List<PlaceSummary>>>{};
-
-  /// Clears in-memory caches so widget tests stay deterministic.
-  @visibleForTesting
-  static void clearCachesForTesting() {
-    _cache.clear();
-    _lastAttemptAt.clear();
-    _inFlight.clear();
-  }
 
   Future<List<PlaceSummary>> fetchNearestGasStations({
     required double lat,
@@ -101,7 +104,7 @@ out center;
     for (var i = 0; i < _endpoints.length; i++) {
       final endpoint = _endpoints[(offset + i) % _endpoints.length];
       try {
-        final res = await http
+        final res = await _client
             .post(
               Uri.parse(endpoint),
               headers: const {
@@ -210,7 +213,7 @@ out center $limit;
     for (var i = 0; i < _endpoints.length; i++) {
       final endpoint = _endpoints[(offset + i) % _endpoints.length];
       try {
-        final res = await http
+        final res = await _client
             .post(
               Uri.parse(endpoint),
               headers: const {

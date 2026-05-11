@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -9,6 +8,7 @@ import '../services/jetson_websocket_service.dart';
 import '../services/user_role_service.dart';
 import '../secrets.dart';
 import '../services/auth_service.dart';
+import '../utils/fatigue_risk_logic.dart';
 
 // -------------------- Color System --------------------
 
@@ -21,10 +21,16 @@ const _border = Color(0x1A000000);
 // -----------------------------------------------------
 
 class LiveMonitorScreen extends StatefulWidget {
-  const LiveMonitorScreen({super.key, this.bleService, this.jetsonWsService});
+  const LiveMonitorScreen({
+    super.key,
+    this.bleService,
+    this.jetsonWsService,
+    this.authService,
+  });
 
   final BleService? bleService;
   final JetsonWebSocketService? jetsonWsService;
+  final AuthService? authService;
 
   @override
   State<LiveMonitorScreen> createState() => _LiveMonitorScreenState();
@@ -34,10 +40,10 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     with WidgetsBindingObserver {
   static const String _jetsonWsUrl = String.fromEnvironment(
     'JETSON_WS_URL',
-    defaultValue: 'ws://localhost:8080/ws/alerts?replay=0',
+    defaultValue: 'wss://sleepydrive.onrender.com/ws/alerts?replay=0',
   );
   static const int _fatigueRiskResetValue = 0;
-  static const int _fatigueRiskStep = 10;
+  static const Duration _fatigueRampInterval = Duration(seconds: 2);
 
   String? _fleetName;
   String? _displayName;
@@ -50,6 +56,8 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   String? _weatherErr;
 
   bool _weatherLoading = false;
+
+  late AuthService _authService;
 
   // ── BLE ──
   late BleService _ble;
@@ -64,10 +72,13 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   StreamSubscription? _jetsonWsAlertSub;
   StreamSubscription? _jetsonPresenceSub;
   Timer? _jetsonPresenceTimer;
+  Timer? _fatigueRampTimer;
 
   String _latestAlertLevel = 'None';
   String _jetsonDeviceState = 'Offline';
   int _fatigueRisk = _fatigueRiskResetValue;
+  bool _hasUnrecoveredJetsonAlert = false;
+  DateTime? _activeFatigueStartedAt;
   DateTime? _jetsonLastSeen;
   final List<_DashboardAlert> _alerts = [];
   static const Duration _jetsonStaleAfter = Duration(seconds: 30);
@@ -88,8 +99,10 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   @override
   void initState() {
     super.initState();
+    _authService = widget.authService ?? AuthService();
     _ble = widget.bleService ?? BleService();
-    _jetsonWs = widget.jetsonWsService ??
+    _jetsonWs =
+        widget.jetsonWsService ??
         JetsonWebSocketService(uri: Uri.parse(_jetsonWsUrl));
     WidgetsBinding.instance.addObserver(this);
     _loadLocationOnce();
@@ -127,10 +140,13 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
         source: 'Jetson WS',
         alertTimestamp: alert.timestamp,
         fatigueRiskPercent: alert.fatigueRiskPercent,
+        fatigueEventDurationSeconds: alert.fatigueEventDurationSeconds,
+        recovered: alert.recovered,
       );
     });
     _jetsonPresenceSub = _jetsonWs.presence.listen(_handleJetsonPresence);
     _startJetsonPresenceWatchdog();
+    _startFatigueRampTimer();
     _jetsonWs.connect();
   }
 
@@ -143,6 +159,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     _jetsonWsAlertSub?.cancel();
     _jetsonPresenceSub?.cancel();
     _jetsonPresenceTimer?.cancel();
+    _fatigueRampTimer?.cancel();
     _ble.dispose();
     _jetsonWs.dispose();
     super.dispose();
@@ -175,12 +192,38 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
     required String source,
     DateTime? alertTimestamp,
     int? fatigueRiskPercent,
+    double? fatigueEventDurationSeconds,
+    bool? recovered,
   }) {
     if (!mounted) return;
     setState(() {
       _latestAlertLevel = levelLabel;
-      final nextRisk = fatigueRiskPercent ?? _fatigueRisk + _fatigueRiskStep;
-      _fatigueRisk = nextRisk.clamp(0, 100).toInt();
+      final isJetson = source == 'Jetson WS';
+      final bool isRecovered = isJetson
+          ? (level == 0 || recovered == true || _messageLooksRecovered(message))
+          : false;
+      final bool isUnrecovered = isJetson && !isRecovered;
+
+      if (isRecovered) {
+        _hasUnrecoveredJetsonAlert = false;
+        _activeFatigueStartedAt = null;
+      } else if (isUnrecovered) {
+        _hasUnrecoveredJetsonAlert = true;
+        _activeFatigueStartedAt = FatigueRiskLogic.inferEventStartedAt(
+          eventTime: alertTimestamp ?? DateTime.now(),
+          eventDurationSeconds: fatigueEventDurationSeconds,
+          previousStartedAt: _activeFatigueStartedAt,
+        );
+      }
+
+      if (isJetson) {
+        _fatigueRisk = FatigueRiskLogic.applyAlert(
+          currentRisk: _fatigueRisk,
+          isRecovered: isRecovered,
+          reportedRiskPercent: fatigueRiskPercent,
+          eventDurationSeconds: fatigueEventDurationSeconds,
+        );
+      }
       _alerts.insert(
         0,
         _DashboardAlert(
@@ -210,10 +253,27 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
       final nextState = presence.online ? 'Online' : 'Offline';
       if (_jetsonDeviceState != nextState && nextState == 'Offline') {
         _fatigueRisk = _fatigueRiskResetValue;
+        _hasUnrecoveredJetsonAlert = false;
+        _activeFatigueStartedAt = null;
       } else if (presence.online && presence.fatigueRiskPercent != null) {
         _fatigueRisk = presence.fatigueRiskPercent!.clamp(0, 100).toInt();
       }
       _jetsonDeviceState = nextState;
+    });
+  }
+
+  void _startFatigueRampTimer() {
+    _fatigueRampTimer?.cancel();
+    _fatigueRampTimer = Timer.periodic(_fatigueRampInterval, (_) {
+      if (!mounted) return;
+      if (_jetsonDeviceState != 'Online') return;
+      setState(() {
+        _fatigueRisk = FatigueRiskLogic.applyRamp(
+          currentRisk: _fatigueRisk,
+          isActiveFatigue: _hasUnrecoveredJetsonAlert,
+          activeDurationSeconds: _activeFatigueDurationSeconds(),
+        );
+      });
     });
   }
 
@@ -228,10 +288,31 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
       if (stale && _jetsonDeviceState != 'Offline') {
         setState(() {
           _fatigueRisk = _fatigueRiskResetValue;
+          _hasUnrecoveredJetsonAlert = false;
+          _activeFatigueStartedAt = null;
           _jetsonDeviceState = 'Offline';
         });
       }
     });
+  }
+
+  double? _activeFatigueDurationSeconds() {
+    final startedAt = _activeFatigueStartedAt;
+    if (startedAt == null) return null;
+    return FatigueRiskLogic.activeDurationSeconds(
+      startedAt: startedAt,
+      now: DateTime.now(),
+    );
+  }
+
+  bool _messageLooksRecovered(String message) {
+    final text = message.trim().toLowerCase();
+    if (text.isEmpty) return false;
+    return text.contains('recover') ||
+        text.contains('resolved') ||
+        text.contains('clear') ||
+        text.contains('back to normal') ||
+        text.contains('attentive again');
   }
 
   void _showAlertSnackBar({
@@ -314,12 +395,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   }
 
   Future<void> _loadProfile() async {
-    User? user;
-    try {
-      user = FirebaseAuth.instance.currentUser;
-    } catch (_) {
-      return;
-    }
+    final user = _authService.currentUser;
     if (user == null) return;
     try {
       final profile = await UserRoleService().fetchProfile(user.uid);
@@ -332,7 +408,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   }
 
   Future<void> _showEditProfileDialog() async {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = _authService.currentUser;
     if (user == null) return;
 
     final current = _displayName ?? '';
@@ -427,7 +503,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
       context: context,
       builder: (ctx) => _JoinFleetDialog(
         onJoin: (code) async {
-          final user = FirebaseAuth.instance.currentUser;
+          final user = _authService.currentUser;
           if (user == null) return;
           await UserRoleService().saveRole(
             uid: user.uid,
@@ -453,7 +529,7 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
   }
 
   Future<void> _backToLogin() async {
-    await AuthService().signOut();
+    await _authService.signOut();
 
     if (!mounted) return;
 
@@ -646,7 +722,6 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen>
                 borderRadius: BorderRadius.circular(16),
               ),
               child: InkWell(
-                key: const ValueKey('drowsinessDetectedBar'),
                 borderRadius: BorderRadius.circular(16),
                 onTap: () => Navigator.pushNamed(context, '/map'),
                 child: const Center(
@@ -815,11 +890,6 @@ class _RiskCard extends StatelessWidget {
                   ),
                   const SizedBox(height: 4),
                   Text(label, style: TextStyle(color: _black(0.65))),
-                  const SizedBox(height: 8),
-                  Text(
-                    "Blink duration + lane behavior",
-                    style: TextStyle(color: _black(0.5)),
-                  ),
                 ],
               ),
             ),
