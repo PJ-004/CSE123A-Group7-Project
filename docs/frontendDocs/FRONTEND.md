@@ -12,33 +12,6 @@ The application integrates:
 
 ### Structure
 
-```
-frontend/
-
-    lib/
-
-        screens/
-
-            drowiness_detected_screen.dart
-
-            live_monitor_screen.dart
-
-            login_screen.dart
-
-        services/
-
-            places_service.dart
-
-            weather_service.dart
-
-            speed_tracking.dart
-
-        app.dart
-
-        main.dart
-        
-        secrets.dart
-```
 
 The frontend is separated into submodules for easier app development. 
 
@@ -56,19 +29,36 @@ The frontend is separated into submodules for easier app development.
 
 - secrets.dart: Stores API keys (gitignored)
 
+- secrets.example.dart: Template showing required API key placeholders, copy to secrets.dart to set up
+
+- role_selection_screen.dart: Post-signup screen where users set their name, role (driver or fleet operator), and Jetson device ID
+
+- fleet_operator_dashboard.dart: Dashboard for fleet operators to monitor multiple drivers' fatigue status in real time
+
+- osm_map_screen.dart: Map screen using OpenStreetMap that displays nearby rest stops after drowsiness is detected
+
+- auth_service.dart: Handles user signup and login with the backend, stores auth token securely on device
+
+- ble_service.dart: Connects to the Jetson via Bluetooth LE and streams drowsiness alerts
+
+- jetson_websocket_service.dart: Connects to the Jetson backend via WebSocket and streams drowsiness alerts and presence events
+
+- osm_places_service.dart: Fetches nearby rest stops using the OpenStreetMap Overpass API with caching and fallback endpoints
+
+- places_service.dart: Fetches nearby gas stations using the Google Places API
+
+- user_role_service.dart: Manages user profile and role data (driver vs fleet operator) from the backend
+
+- fatigue_risk_logic.dart: Pure logic for computing and ramping the fatigue risk percentage from incoming alerts
+
 ### App Navigation Flow
 
 Login Screen -> Live Monitor Dashboard -> Drowsiness Detected Screen
 
 ### User Authentication
 
-Currently, we support for the driver side of the application. We will work on the Fleet
-Operator side of the application towards the next quarter. 
+Create an account and pick user role options. Set name and device (jetson ID) ID.
 
-#### Driver Authentication:
-email: admin@blink.ai
-
-password: blink123
 
 ### Dashboard Components
 
