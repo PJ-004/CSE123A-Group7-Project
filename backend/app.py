@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
 import secrets
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
@@ -12,7 +17,9 @@ from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketD
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from auth import AuthUser, require_firebase_user
+import bcrypt as _bcrypt
+
+from auth import AuthUser, issue_token, require_jwt_user
 from db import Database
 from mqtt_consumer import MQTTConsumer
 from repository import AlertRepository
@@ -44,6 +51,11 @@ def _check_gateway_rest(
 
 
 def _log_security_warnings(settings: Settings) -> None:
+    if not os.getenv("JWT_SECRET"):
+        log.warning(
+            "JWT_SECRET is not set: a random secret was generated — all tokens will be "
+            "invalidated on server restart. Set JWT_SECRET in the environment for production."
+        )
     if settings.gateway_api_key is None:
         log.warning(
             "GATEWAY_API_KEY is not set: /alerts/recent and /ws/alerts are unauthenticated",
@@ -89,6 +101,191 @@ def _iso(value: Any) -> str | None:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def _coerce_percent(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(str(value).strip().rstrip("%"))
+    except (TypeError, ValueError):
+        return None
+    if parsed < 0:
+        return 0
+    if 0 < parsed <= 1:
+        parsed *= 100
+    return max(0, min(round(parsed), 100))
+
+
+def _metadata_percent(metadata: Any) -> int | None:
+    if not isinstance(metadata, dict):
+        return None
+    for key in (
+        "fatigue_risk_percent",
+        "fatigue_risk",
+        "fatigueRiskPercent",
+        "fatigueRisk",
+        "risk_percent",
+        "riskPercent",
+        "fatigue_score",
+        "fatigueScore",
+        "score",
+    ):
+        value = _coerce_percent(metadata.get(key))
+        if value is not None:
+            return value
+    risk = _coerce_percent(metadata.get("risk"))
+    if risk is not None and risk > 2:
+        return risk
+    return None
+
+
+def _fetch_json_url(url: str, timeout_seconds: float = 12.0) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "SleepyDrive/1.0 routing-proxy",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            status = getattr(response, "status", response.getcode())
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Routing provider returned HTTP {exc.code}: {detail}",
+        ) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Routing provider unavailable: {exc}",
+        ) from exc
+
+    if status != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Routing provider returned HTTP {status}",
+        )
+
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="Routing provider returned invalid JSON") from exc
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Routing provider response was invalid")
+    return data
+
+
+def _decode_google_polyline(polyline: str) -> list[list[float]]:
+    coords: list[list[float]] = []
+    index = 0
+    lat = 0
+    lng = 0
+
+    while index < len(polyline):
+        result = 0
+        shift = 0
+        while True:
+            value = ord(polyline[index]) - 63
+            index += 1
+            result |= (value & 0x1F) << shift
+            shift += 5
+            if value < 0x20:
+                break
+        lat += ~(result >> 1) if result & 1 else result >> 1
+
+        result = 0
+        shift = 0
+        while True:
+            value = ord(polyline[index]) - 63
+            index += 1
+            result |= (value & 0x1F) << shift
+            shift += 5
+            if value < 0x20:
+                break
+        lng += ~(result >> 1) if result & 1 else result >> 1
+
+        coords.append([lng / 1e5, lat / 1e5])
+
+    return coords
+
+
+def _google_directions_to_osrm(data: dict[str, Any]) -> dict[str, Any]:
+    status = str(data.get("status") or "UNKNOWN")
+    if status != "OK":
+        detail = str(data.get("error_message") or status)
+        raise HTTPException(status_code=502, detail=f"Google Directions error {detail}")
+
+    routes = data.get("routes")
+    if not isinstance(routes, list) or not routes:
+        raise HTTPException(status_code=502, detail="Google Directions returned no routes")
+
+    route = routes[0]
+    if not isinstance(route, dict):
+        raise HTTPException(status_code=502, detail="Google Directions route was invalid")
+
+    legs = route.get("legs")
+    if not isinstance(legs, list) or not legs:
+        raise HTTPException(status_code=502, detail="Google Directions returned no legs")
+
+    distance = 0.0
+    duration = 0.0
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        distance += float((leg.get("distance") or {}).get("value") or 0)
+        duration += float((leg.get("duration") or {}).get("value") or 0)
+
+    overview = route.get("overview_polyline")
+    points = overview.get("points") if isinstance(overview, dict) else None
+    if not isinstance(points, str) or not points:
+        raise HTTPException(status_code=502, detail="Google Directions returned no route geometry")
+
+    return {
+        "code": "Ok",
+        "routes": [
+            {
+                "distance": distance,
+                "duration": duration,
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": _decode_google_polyline(points),
+                },
+            },
+        ],
+    }
+
+
+def _risk_from_alert_level(level: Any) -> int | None:
+    try:
+        parsed = int(level)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return 0
+    if parsed == 1:
+        return 50
+    return 90
+
+
+def _fatigue_status(risk: int | None) -> str:
+    if risk is None:
+        return "No data"
+    if risk >= 90:
+        return "Extreme fatigue"
+    if risk >= 70:
+        return "Critical fatigue"
+    if risk >= 50:
+        return "High fatigue"
+    if risk >= 30:
+        return "Moderate fatigue"
+    if risk >= 10:
+        return "Low fatigue"
+    return "No fatigue"
 
 
 async def _receive_within_limit(websocket: WebSocket, max_bytes: int) -> None:
@@ -167,10 +364,62 @@ def create_app() -> FastAPI:
     )
 
     def _auth_user(authorization: str | None) -> AuthUser:
-        return require_firebase_user(
+        return require_jwt_user(
             authorization=authorization,
-            project_id=settings.firebase_project_id,
+            secret=settings.jwt_secret,
         )
+
+    @app.get("/routing/driving")
+    async def driving_route(
+        from_lat: float = Query(..., ge=-90, le=90),
+        from_lon: float = Query(..., ge=-180, le=180),
+        to_lat: float = Query(..., ge=-90, le=90),
+        to_lon: float = Query(..., ge=-180, le=180),
+        google_api_key: str | None = Query(None, max_length=256),
+    ):
+        query = urllib.parse.urlencode(
+            {
+                "overview": "full",
+                "geometries": "geojson",
+            },
+        )
+        route_path = f"{from_lon},{from_lat};{to_lon},{to_lat}?{query}"
+        urls = (
+            f"https://router.project-osrm.org/route/v1/driving/{route_path}",
+            f"https://routing.openstreetmap.de/routed-car/route/v1/driving/{route_path}",
+        )
+        errors = []
+        for url in urls:
+            try:
+                return await asyncio.to_thread(_fetch_json_url, url)
+            except HTTPException as exc:
+                errors.append(str(exc.detail))
+
+        google_key = (
+            google_api_key
+            or os.getenv("GOOGLE_DIRECTIONS_API_KEY")
+            or os.getenv("GOOGLE_MAPS_API_KEY")
+            or os.getenv("GOOGLE_PLACES_API_KEY")
+        )
+        if google_key:
+            google_query = urllib.parse.urlencode(
+                {
+                    "origin": f"{from_lat},{from_lon}",
+                    "destination": f"{to_lat},{to_lon}",
+                    "mode": "driving",
+                    "key": google_key,
+                },
+            )
+            try:
+                data = await asyncio.to_thread(
+                    _fetch_json_url,
+                    f"https://maps.googleapis.com/maps/api/directions/json?{google_query}",
+                )
+                return _google_directions_to_osrm(data)
+            except HTTPException as exc:
+                errors.append(str(exc.detail))
+
+        raise HTTPException(status_code=502, detail=" | ".join(errors))
 
     async def _generate_invite_code(conn) -> str:
         alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -272,6 +521,56 @@ def create_app() -> FastAPI:
                 )
             row = await _profile_row(user.uid)
         return row
+
+    @app.post("/auth/signup", status_code=201)
+    async def signup(data: dict) -> dict:
+        email = _clean_optional_text(data.get("email"), 320)
+        password = str(data.get("password") or "").strip()
+        if not email or len(password) < 6:
+            raise HTTPException(
+                status_code=400,
+                detail="Email and password (min 6 chars) required",
+            )
+
+        uid = str(uuid.uuid4())
+        password_hash = _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
+
+        async with db.pool.acquire() as conn:
+            try:
+                await conn.execute(
+                    "INSERT INTO credentials (uid, email, password_hash) VALUES ($1, $2, $3)",
+                    uid,
+                    email.lower(),
+                    password_hash,
+                )
+            except Exception as exc:
+                if "unique" in str(exc).lower():
+                    raise HTTPException(status_code=409, detail="email-already-in-use") from exc
+                raise
+
+        token = issue_token(uid, email.lower(), settings.jwt_secret, settings.jwt_expiry_hours)
+        return {"token": token, "uid": uid, "email": email.lower()}
+
+    @app.post("/auth/login")
+    async def login(data: dict) -> dict:
+        email = _clean_optional_text(data.get("email"), 320)
+        password = str(data.get("password") or "").strip()
+        if not email or not password:
+            raise HTTPException(status_code=400, detail="Email and password required")
+
+        async with db.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT uid, password_hash FROM credentials WHERE email = $1",
+                email.lower(),
+            )
+
+        if row is None or not _bcrypt.checkpw(password.encode(), row["password_hash"].encode()):
+            raise HTTPException(status_code=401, detail="wrong-password")
+
+        token = issue_token(
+            row["uid"], email.lower(), settings.jwt_secret, settings.jwt_expiry_hours
+        )
+        return {"token": token, "uid": row["uid"], "email": email.lower()}
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -475,22 +774,36 @@ def create_app() -> FastAPI:
                     u.email,
                     u.display_name,
                     u.device_id,
-                    ds.online,
+                    (ds.online IS TRUE) AS online,
                     ds.last_seen,
+                    ds.metadata AS status_metadata,
                     ae.id AS alert_id,
                     ae.level AS alert_level,
                     ae.message AS alert_message,
                     ae.event_ts AS alert_event_ts,
-                    ae.received_ts AS alert_received_ts
+                    ae.received_ts AS alert_received_ts,
+                    ae.metadata AS alert_metadata,
+                    ac.alert_count
                 FROM users u
                 LEFT JOIN device_status ds ON ds.device_id = u.device_id
                 LEFT JOIN LATERAL (
-                    SELECT id, level, message, event_ts, received_ts
+                    SELECT id, level, message, event_ts, received_ts, metadata
                     FROM alert_events
-                    WHERE device_id = u.device_id
+                    WHERE (
+                            device_id = u.device_id
+                            AND received_ts >= NOW() - INTERVAL '5 minutes'
+                        )
                     ORDER BY received_ts DESC
                     LIMIT 1
                 ) ae ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*)::int AS alert_count
+                    FROM alert_events
+                    WHERE (
+                            device_id = u.device_id
+                            AND received_ts >= NOW() - INTERVAL '5 minutes'
+                        )
+                ) ac ON TRUE
                 WHERE u.role = 'driver' AND u.fleet_id = $1
                 ORDER BY
                     COALESCE(ae.received_ts, ds.last_seen, u.updated_at) DESC,
@@ -502,6 +815,18 @@ def create_app() -> FastAPI:
 
         drivers: list[dict[str, Any]] = []
         for row in rows:
+            status_metadata = row["status_metadata"] if isinstance(row["status_metadata"], dict) else {}
+            alert_metadata = row["alert_metadata"] if isinstance(row["alert_metadata"], dict) else {}
+            is_online = bool(row["online"]) if row["online"] is not None else False
+            if is_online:
+                fatigue_risk_percent = _metadata_percent(alert_metadata)
+                if fatigue_risk_percent is None:
+                    fatigue_risk_percent = _metadata_percent(status_metadata)
+                if fatigue_risk_percent is None:
+                    fatigue_risk_percent = _risk_from_alert_level(row["alert_level"])
+            else:
+                fatigue_risk_percent = 0
+
             latest_alert = None
             if row["alert_id"] is not None:
                 latest_alert = {
@@ -510,6 +835,8 @@ def create_app() -> FastAPI:
                     "message": row["alert_message"],
                     "event_ts": _iso(row["alert_event_ts"]),
                     "received_ts": _iso(row["alert_received_ts"]),
+                    "metadata": alert_metadata,
+                    "fatigue_risk_percent": fatigue_risk_percent,
                 }
 
             drivers.append(
@@ -518,9 +845,22 @@ def create_app() -> FastAPI:
                     "email": row["email"],
                     "display_name": row["display_name"],
                     "device_id": row["device_id"],
-                    "online": bool(row["online"]) if row["online"] is not None else False,
+                    "online": is_online,
                     "last_seen": _iso(row["last_seen"]),
+                    "status_metadata": status_metadata,
+                    "alert_count": row["alert_count"] or 0,
+                    "fatigue_risk_percent": fatigue_risk_percent,
+                    "fatigue_status": _fatigue_status(fatigue_risk_percent),
                     "latest_alert": latest_alert,
+                    "metrics": {
+                        "online": is_online,
+                        "last_seen": _iso(row["last_seen"]),
+                        "alert_count": row["alert_count"] or 0,
+                        "fatigue_risk_percent": fatigue_risk_percent,
+                        "fatigue_status": _fatigue_status(fatigue_risk_percent),
+                        "latest_alert_level": row["alert_level"],
+                        "latest_alert_at": _iso(row["alert_event_ts"] or row["alert_received_ts"]),
+                    },
                 },
             )
 

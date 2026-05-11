@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import HTTPException
@@ -14,18 +13,11 @@ class AuthUser:
     name: str | None = None
 
 
-def issue_token(uid: str, email: str | None, secret: str, expiry_hours: int) -> str:
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": uid,
-        "email": email,
-        "iat": now,
-        "exp": now + timedelta(hours=expiry_hours),
-    }
-    return jwt.encode(payload, secret, algorithm="HS256")
-
-
-def require_jwt_user(*, authorization: str | None, secret: str) -> AuthUser:
+def require_jwt_user(
+    *,
+    authorization: str | None,
+    secret: str,
+) -> AuthUser:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
 
@@ -42,4 +34,8 @@ def require_jwt_user(*, authorization: str | None, secret: str) -> AuthUser:
     if not isinstance(uid, str) or not uid:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    return AuthUser(uid=uid, email=payload.get("email"))
+    email = payload.get("email")
+    return AuthUser(
+        uid=uid,
+        email=email if isinstance(email, str) else None,
+    )
