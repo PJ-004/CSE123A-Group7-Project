@@ -1,4 +1,3 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:drowsiness_guide/services/auth_service.dart';
@@ -125,38 +124,6 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<void> _handleGoogleSignIn() async {
-    setState(() {
-      _isLoading = true;
-      _errorText = null;
-    });
-
-    try {
-      final result = await _authService.signInWithGoogle();
-
-      if (result == null) {
-        setState(() {
-          _errorText = 'Sign-in was cancelled';
-        });
-      } else {
-        await _routeSignedInUser();
-      }
-    } catch (e, st) {
-      debugPrint('Google sign-in error: $e');
-      debugPrintStack(stackTrace: st);
-
-      setState(() {
-        _errorText = _friendlyAuthError(e);
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
-    }
-  }
-
   String _friendlyAuthError(Object error) {
     if (error is UserRoleServiceException) {
       if (error.isNotFound) {
@@ -195,7 +162,7 @@ class _LoginScreenState extends State<LoginScreen> {
       return 'This account has been disabled.';
     }
     if (text.contains('operation-not-allowed')) {
-      return 'Email/password sign-in is not enabled in Firebase.';
+      return 'Email/password sign-in is not enabled for this backend.';
     }
     if (text.contains('No authenticated user found')) {
       return 'Authentication succeeded, but no user session was available.';
@@ -250,6 +217,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       const SizedBox(height: 36),
                       _FlatField(
+                        fieldKey: const ValueKey<String>('login_email'),
                         controller: _emailCtrl,
                         hint: 'email',
                         obscure: false,
@@ -261,6 +229,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       const SizedBox(height: 14),
                       _FlatField(
+                        fieldKey: const ValueKey<String>('login_password'),
                         controller: _passCtrl,
                         hint: 'password',
                         obscure: true,
@@ -330,69 +299,6 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'or',
-                        style: TextStyle(color: subTextColor, fontSize: 14),
-                      ),
-                      const SizedBox(height: 16),
-                      SizedBox(
-                        width: 290,
-                        height: 58,
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(16),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.12),
-                                blurRadius: 18,
-                                offset: const Offset(0, 8),
-                              ),
-                            ],
-                          ),
-                          child: FilledButton(
-                            style: FilledButton.styleFrom(
-                              backgroundColor: primaryButtonColor,
-                              foregroundColor: Colors.white,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 20,
-                                vertical: 16,
-                              ),
-                            ),
-                            onPressed: _isLoading ? null : _handleGoogleSignIn,
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                if (_isLoading)
-                                  const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2.2,
-                                      color: Colors.white,
-                                    ),
-                                  )
-                                else
-                                  const Icon(Icons.login_rounded, size: 24),
-                                const SizedBox(width: 12),
-                                Text(
-                                  _isLoading
-                                      ? 'Signing in...'
-                                      : 'Continue with Google',
-                                  style: const TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.w700,
-                                    letterSpacing: 0.2,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
                       if (_errorText != null) ...[
                         const SizedBox(height: 18),
                         Text(
@@ -417,6 +323,7 @@ class _LoginScreenState extends State<LoginScreen> {
 }
 
 class _FlatField extends StatelessWidget {
+  final Key? fieldKey;
   final TextEditingController controller;
   final String hint;
   final bool obscure;
@@ -427,6 +334,7 @@ class _FlatField extends StatelessWidget {
   final Color focusBorderColor;
 
   const _FlatField({
+    this.fieldKey,
     required this.controller,
     required this.hint,
     required this.obscure,
@@ -442,6 +350,7 @@ class _FlatField extends StatelessWidget {
     return SizedBox(
       height: 54,
       child: TextField(
+        key: fieldKey,
         controller: controller,
         obscureText: obscure,
         textAlign: TextAlign.center,

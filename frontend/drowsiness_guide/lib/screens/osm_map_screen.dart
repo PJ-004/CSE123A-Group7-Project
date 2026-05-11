@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -14,8 +15,20 @@ import '../services/places_service.dart' as gplaces;
 class OSMMapScreen extends StatefulWidget {
   final double? destLat;
   final double? destLng;
+  final osm.OSMPlacesService? osmPlacesService;
+  final gplaces.PlacesService? googlePlacesService;
 
-  const OSMMapScreen({super.key, this.destLat, this.destLng});
+  /// When set (e.g. in tests), skips permission checks and uses this position.
+  final Future<Position> Function()? getCurrentPosition;
+
+  const OSMMapScreen({
+    super.key,
+    this.destLat,
+    this.destLng,
+    this.osmPlacesService,
+    this.googlePlacesService,
+    this.getCurrentPosition,
+  });
 
   @override
   State<OSMMapScreen> createState() => _OSMMapScreenState();
@@ -27,6 +40,12 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
   static const Color _brandBlue = Color(0xFF5E8AD6);
   static const Color _bgTop = Color(0xFFCED8E4);
   static const Color _bgBottom = Color(0xFF7E97B9);
+  static const String _backendBaseUrl = String.fromEnvironment(
+    'BACKEND_BASE_URL',
+    defaultValue: 'https://sleepydrive.onrender.com',
+  );
+  static const Duration _locationTimeout = Duration(seconds: 12);
+  static const Duration _lastKnownLocationTimeout = Duration(seconds: 3);
 
   Position? _pos;
   LatLng? _dest;
@@ -35,56 +54,135 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
   bool _loadingStops = false;
   bool _showOtherStops = false;
   String? _stopsError;
-  final osm.OSMPlacesService _places = osm.OSMPlacesService();
-  final gplaces.PlacesService _googlePlaces =
-      gplaces.PlacesService(apiKey: googlePlacesApiKey);
+  late final osm.OSMPlacesService _places;
+  late final gplaces.PlacesService _googlePlaces;
 
   String _status = 'Loading location…';
   String _routeInfo = '';
+  bool _isDisposed = false;
+
+  String get _routingBackendBaseUrl => _backendBaseUrl.endsWith('/')
+      ? _backendBaseUrl.substring(0, _backendBaseUrl.length - 1)
+      : _backendBaseUrl;
 
   @override
   void initState() {
     super.initState();
+    _places = widget.osmPlacesService ?? osm.OSMPlacesService();
+    _googlePlaces = widget.googlePlacesService ??
+        gplaces.PlacesService(apiKey: googlePlacesApiKey);
     if (widget.destLat != null && widget.destLng != null) {
       _dest = LatLng(widget.destLat!, widget.destLng!);
     }
     _initLocation();
   }
 
+  @override
+  void dispose() {
+    _isDisposed = true;
+    super.dispose();
+  }
+
+  bool get _canUpdateUi => mounted && !_isDisposed;
+
+  void _safeSetState(VoidCallback updater) {
+    if (!_canUpdateUi) return;
+    setState(updater);
+  }
+
+  Future<Position?> _getPositionWithFallback({
+    required Future<Position> Function() fetchCurrent,
+  }) async {
+    try {
+      return await fetchCurrent().timeout(_locationTimeout);
+    } on TimeoutException {
+      debugPrint(
+        'Location request timed out after ${_locationTimeout.inSeconds}s; trying last known position.',
+      );
+      try {
+        return await Geolocator.getLastKnownPosition().timeout(
+          _lastKnownLocationTimeout,
+        );
+      } catch (e) {
+        debugPrint('Failed to read last known position: $e');
+        return null;
+      }
+    }
+  }
+
   Future<void> _initLocation() async {
     try {
-      setState(() => _status = 'Requesting location permission…');
+      if (widget.getCurrentPosition != null) {
+        _safeSetState(() => _status = 'Getting current position…');
+        final p = await _getPositionWithFallback(
+          fetchCurrent: widget.getCurrentPosition!,
+        );
+        if (p == null) {
+          _safeSetState(
+            () => _status =
+                'Unable to determine location. Set emulator location and retry.',
+          );
+          return;
+        }
+        _safeSetState(() {
+          _pos = p;
+          _status = 'Ready';
+        });
+        if (!_canUpdateUi) return;
+
+        final me = LatLng(p.latitude, p.longitude);
+        _mapController.move(me, 14);
+
+        await _loadStops();
+
+        if (_dest != null) {
+          await _buildRoute();
+        }
+        return;
+      }
+
+      _safeSetState(() => _status = 'Requesting location permission…');
 
       LocationPermission perm = await Geolocator.checkPermission();
       if (perm == LocationPermission.denied) {
         perm = await Geolocator.requestPermission();
       }
       if (perm == LocationPermission.deniedForever) {
-        setState(() => _status = 'Location permission denied forever.');
+        _safeSetState(() => _status = 'Location permission denied forever.');
         return;
       }
       if (perm == LocationPermission.denied) {
-        setState(() => _status = 'Location permission denied.');
+        _safeSetState(() => _status = 'Location permission denied.');
         return;
       }
 
       final enabled = await Geolocator.isLocationServiceEnabled();
       if (!enabled) {
-        setState(() => _status = 'Location services are disabled.');
+        _safeSetState(() => _status = 'Location services are disabled.');
         return;
       }
 
-      setState(() => _status = 'Getting current position…');
-      final p = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
+      _safeSetState(() => _status = 'Getting current position…');
+      final p = await _getPositionWithFallback(
+        fetchCurrent: () => Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+          ),
         ),
       );
+      if (p == null) {
+        _safeSetState(
+          () => _status =
+              'Unable to determine location. Set emulator location and retry.',
+        );
+        return;
+      }
 
-      setState(() {
+      _safeSetState(() {
         _pos = p;
         _status = 'Ready';
       });
+      if (!_canUpdateUi) return;
 
       final me = LatLng(p.latitude, p.longitude);
       _mapController.move(me, 14);
@@ -95,7 +193,7 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
         await _buildRoute();
       }
     } catch (e) {
-      setState(() => _status = 'Failed to get location: $e');
+      _safeSetState(() => _status = 'Failed to get location: $e');
     }
   }
 
@@ -105,30 +203,18 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
     final from = LatLng(_pos!.latitude, _pos!.longitude);
     final to = _dest!;
 
-    setState(() {
+      _safeSetState(() {
       _status = 'Routing…';
       _route = [];
       _routeInfo = '';
     });
 
-    final url = Uri.parse(
-      'https://router.project-osrm.org/route/v1/driving/'
-      '${from.longitude},${from.latitude};${to.longitude},${to.latitude}'
-      '?overview=full&geometries=geojson',
-    );
-
     try {
-      final res = await http.get(url).timeout(const Duration(seconds: 12));
-      if (res.statusCode != 200) {
-        setState(() => _status = 'Route error: HTTP ${res.statusCode}');
-        return;
-      }
-
-      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      final data = await _fetchDrivingRoute(from, to);
       final routes = data['routes'] as List<dynamic>?;
 
       if (routes == null || routes.isEmpty) {
-        setState(() => _status = 'No route found.');
+        _safeSetState(() => _status = 'No driving route found.');
         return;
       }
 
@@ -137,14 +223,18 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
       final durationS = (r0['duration'] as num).toDouble();
 
       final geometry = r0['geometry'] as Map<String, dynamic>;
-      final coords = (geometry['coordinates'] as List<dynamic>)
-          .cast<List<dynamic>>();
+      final coords = geometry['coordinates'] as List<dynamic>;
 
       final pts = coords
+          .whereType<List>()
           .map(
             (c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()),
           )
           .toList();
+      if (pts.isEmpty) {
+        _safeSetState(() => _status = 'Driving route returned no geometry.');
+        return;
+      }
 
       final selectedStop = _stopsWithRoutes.isEmpty
           ? null
@@ -158,16 +248,203 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
       final miles = distanceM / 1609.344;
       final etaMin = (durationS / 60).round();
 
-      setState(() {
+      _safeSetState(() {
         _route = pts;
         _status = 'Ready';
         _routeInfo = '$stopName • ${miles.toStringAsFixed(1)} mi • $etaMin min';
       });
+      if (!_canUpdateUi) return;
 
       _fitToPoints([from, to, ...pts]);
     } catch (e) {
-      setState(() => _status = 'Routing failed: $e');
+      debugPrint('OSRM route API failed: $e');
+      _safeSetState(() {
+        _route = [];
+        _routeInfo = '';
+        _status =
+            'Driving route unavailable. Tap navigate to open Google Maps.';
+      });
+      if (!_canUpdateUi) return;
+      _fitToPoints([from, to]);
     }
+  }
+
+  Future<Map<String, dynamic>> _fetchDrivingRoute(
+    LatLng from,
+    LatLng to,
+  ) async {
+    final completer = Completer<Map<String, dynamic>>();
+    final errors = <String>[];
+    var pending = 0;
+
+    for (final uri in _routeRequestUris(from, to)) {
+      pending++;
+      unawaited(() async {
+        try {
+          final data = await _fetchRouteUri(uri);
+          if (!completer.isCompleted) {
+            completer.complete(data);
+          }
+        } catch (e) {
+          errors.add('${uri.host}: $e');
+          pending--;
+          if (pending == 0 && !completer.isCompleted) {
+            completer.completeError(Exception(errors.join(' | ')));
+          }
+        }
+      }());
+    }
+
+    return completer.future;
+  }
+
+  Future<Map<String, dynamic>> _fetchRouteUri(Uri uri) async {
+    final res = await http.get(uri).timeout(const Duration(seconds: 12));
+    if (res.statusCode != 200) {
+      throw Exception('HTTP ${res.statusCode}');
+    }
+
+    final data = jsonDecode(res.body);
+    final body = data is Map<String, dynamic>
+        ? data
+        : data is Map
+        ? Map<String, dynamic>.from(data)
+        : null;
+    if (body == null) {
+      throw Exception('invalid response');
+    }
+    if (uri.host == 'maps.googleapis.com') {
+      return _googleDirectionsToOsrm(body);
+    }
+    return body;
+  }
+
+  List<Uri> _routeRequestUris(LatLng from, LatLng to) {
+    final requests = <Uri>[
+      Uri.parse('$_routingBackendBaseUrl/routing/driving').replace(
+        queryParameters: {
+          'from_lat': from.latitude.toString(),
+          'from_lon': from.longitude.toString(),
+          'to_lat': to.latitude.toString(),
+          'to_lon': to.longitude.toString(),
+          if (googlePlacesApiKey.isNotEmpty &&
+              googlePlacesApiKey != 'YOUR_GOOGLE_PLACES_API_KEY')
+            'google_api_key': googlePlacesApiKey,
+        },
+      ),
+    ];
+    if (googlePlacesApiKey.isNotEmpty &&
+        googlePlacesApiKey != 'YOUR_GOOGLE_PLACES_API_KEY') {
+      requests.add(
+        Uri.https('maps.googleapis.com', '/maps/api/directions/json', {
+          'origin': '${from.latitude},${from.longitude}',
+          'destination': '${to.latitude},${to.longitude}',
+          'mode': 'driving',
+          'key': googlePlacesApiKey,
+        }),
+      );
+    }
+    requests.addAll([
+      Uri.https(
+        'routing.openstreetmap.de',
+        '/routed-car/route/v1/driving/'
+            '${from.longitude},${from.latitude};${to.longitude},${to.latitude}',
+        {'overview': 'full', 'geometries': 'geojson'},
+      ),
+      Uri.https(
+        'router.project-osrm.org',
+        '/route/v1/driving/'
+            '${from.longitude},${from.latitude};${to.longitude},${to.latitude}',
+        {'overview': 'full', 'geometries': 'geojson'},
+      ),
+    ]);
+    return requests;
+  }
+
+  Map<String, dynamic> _googleDirectionsToOsrm(Map<String, dynamic> data) {
+    final status = data['status']?.toString() ?? 'UNKNOWN';
+    if (status != 'OK') {
+      throw Exception('Google Directions error $status');
+    }
+
+    final routes = data['routes'];
+    if (routes is! List || routes.isEmpty) {
+      throw Exception('Google Directions returned no routes');
+    }
+
+    final route = routes.first;
+    if (route is! Map) {
+      throw Exception('Google Directions route was invalid');
+    }
+
+    var distance = 0.0;
+    var duration = 0.0;
+    final legs = route['legs'];
+    if (legs is List) {
+      for (final leg in legs) {
+        if (leg is! Map) continue;
+        final distanceValue = leg['distance'] is Map
+            ? (leg['distance']['value'] as num?)?.toDouble()
+            : null;
+        final durationValue = leg['duration'] is Map
+            ? (leg['duration']['value'] as num?)?.toDouble()
+            : null;
+        distance += distanceValue ?? 0;
+        duration += durationValue ?? 0;
+      }
+    }
+
+    final overview = route['overview_polyline'];
+    final points = overview is Map ? overview['points']?.toString() : null;
+    if (points == null || points.isEmpty) {
+      throw Exception('Google Directions returned no geometry');
+    }
+
+    return {
+      'code': 'Ok',
+      'routes': [
+        {
+          'distance': distance,
+          'duration': duration,
+          'geometry': {
+            'type': 'LineString',
+            'coordinates': _decodeGooglePolyline(points),
+          },
+        },
+      ],
+    };
+  }
+
+  List<List<double>> _decodeGooglePolyline(String encoded) {
+    final coords = <List<double>>[];
+    var index = 0;
+    var lat = 0;
+    var lng = 0;
+
+    while (index < encoded.length) {
+      var result = 0;
+      var shift = 0;
+      int value;
+      do {
+        value = encoded.codeUnitAt(index++) - 63;
+        result |= (value & 0x1f) << shift;
+        shift += 5;
+      } while (value >= 0x20);
+      lat += (result & 1) != 0 ? ~(result >> 1) : result >> 1;
+
+      result = 0;
+      shift = 0;
+      do {
+        value = encoded.codeUnitAt(index++) - 63;
+        result |= (value & 0x1f) << shift;
+        shift += 5;
+      } while (value >= 0x20);
+      lng += (result & 1) != 0 ? ~(result >> 1) : result >> 1;
+
+      coords.add([lng / 1e5, lat / 1e5]);
+    }
+
+    return coords;
   }
 
   Future<void> _loadStops() async {
@@ -232,10 +509,8 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as Map<String, dynamic>;
         if (data['code'] == 'Ok') {
-          final distances =
-              (data['distances'] as List).first as List<dynamic>;
-          final durations =
-              (data['durations'] as List).first as List<dynamic>;
+          final distances = (data['distances'] as List).first as List<dynamic>;
+          final durations = (data['durations'] as List).first as List<dynamic>;
 
           return List.generate(stops.length, (i) {
             final distMeters = (distances[i + 1] as num?)?.toDouble() ?? 0;
@@ -253,9 +528,7 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
     }
 
     return stops
-        .map(
-          (s) => _StopWithRoute(place: s, distanceMiles: 0, etaMinutes: 0),
-        )
+        .map((s) => _StopWithRoute(place: s, distanceMiles: 0, etaMinutes: 0))
         .toList();
   }
 
@@ -264,7 +537,11 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
     final lon = _pos!.longitude;
 
     try {
-      return await _places.fetchNearestGasStations(lat: lat, lon: lon, limit: 5);
+      return await _places.fetchNearestGasStations(
+        lat: lat,
+        lon: lon,
+        limit: 5,
+      );
     } catch (osmErr) {
       debugPrint('OSM stops failed: $osmErr');
       try {
@@ -335,7 +612,8 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
   }
 
   Widget _buildStopRow(_StopWithRoute stop) {
-    final isSelected = _dest != null &&
+    final isSelected =
+        _dest != null &&
         (stop.place.lat - _dest!.latitude).abs() < 0.0001 &&
         (stop.place.lon - _dest!.longitude).abs() < 0.0001;
 
@@ -409,19 +687,16 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
         title: const Text('Map'),
         actions: [
           IconButton(
-            key: const ValueKey('mapReCenter'),
             tooltip: 'Re-center',
             onPressed: me == null ? null : () => _mapController.move(me, 15),
             icon: const Icon(Icons.my_location),
           ),
           IconButton(
-            key: const ValueKey('mapReRoute'),
             tooltip: 'Re-route',
             onPressed: (_pos != null && _dest != null) ? _buildRoute : null,
             icon: const Icon(Icons.alt_route),
           ),
           IconButton(
-            key: const ValueKey('mapReloadStops'),
             tooltip: 'Reload stops',
             onPressed: _pos == null || _loadingStops ? null : _loadStops,
             icon: const Icon(Icons.local_gas_station),
@@ -600,13 +875,14 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                                     height: 48,
                                     width: 48,
                                     child: IconButton(
-                                      key: const ValueKey('mapNavigateMain'),
                                       style: IconButton.styleFrom(
                                         backgroundColor: _brandBlue,
                                         foregroundColor: Colors.white,
                                         padding: EdgeInsets.zero,
                                         shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(8),
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
                                         ),
                                       ),
                                       onPressed: _openGoogleNav,
@@ -619,7 +895,6 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                                   SizedBox(
                                     height: 48,
                                     child: FilledButton(
-                                      key: const ValueKey('mapMoreStops'),
                                       style: FilledButton.styleFrom(
                                         backgroundColor: _showOtherStops
                                             ? Colors.grey.shade600
@@ -629,11 +904,14 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                                           horizontal: 10,
                                         ),
                                         shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(8),
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
                                         ),
                                       ),
                                       onPressed: () => setState(
-                                        () => _showOtherStops = !_showOtherStops,
+                                        () =>
+                                            _showOtherStops = !_showOtherStops,
                                       ),
                                       child: Text(
                                         _showOtherStops ? 'Close' : 'More',
@@ -678,7 +956,10 @@ class _OSMMapScreenState extends State<OSMMapScreen> {
                         _loadingStops
                             ? 'Loading stops…'
                             : 'Stops: ${_stopsWithRoutes.length}',
-                        style: const TextStyle(fontSize: 11, color: Colors.black87),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.black87,
+                        ),
                       ),
                     ),
                   ),
