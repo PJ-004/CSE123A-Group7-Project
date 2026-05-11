@@ -1,0 +1,13 @@
+serverinstructions.txt
+__pycache__/
+*.py[cod]
+*.pyc
+.venv/
+venv/
+.agent/
+.env
+.env.*
+**/google-services.json
+**/GoogleService-Info.plist
+**/firebase.json
+**/firebase_options.dart
