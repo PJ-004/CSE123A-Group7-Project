@@ -1,0 +1,9 @@
+{
+  "code": {
+    "exts": [".py", ".dart"]
+  },
+  "doc": {
+    "exts": [".md"],
+    "include": ["docs/", "userdocs/"]
+  }
+}
