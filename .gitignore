@@ -11,3 +11,4 @@ venv/
 **/GoogleService-Info.plist
 **/firebase.json
 **/firebase_options.dart
+docs/designdocs/pdf_venv/
