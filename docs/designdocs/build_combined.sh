@@ -1,6 +1,6 @@
 #!/bin/bash
 cd "$(dirname "$0")"
-OUT="SleepyDrive_Design_Document.md"
+OUT="Blink_Design_Document.md"
 
 # Cover page
 head -11 README.md > "$OUT"
